@@ -1,0 +1,33 @@
+# HaroClip — core dependency skeleton
+# NOTE: not yet installed. Heavy packages (torch, ultralytics, faster-whisper)
+# need a CUDA build matched to the target GPU (24GB VRAM budget) before install.
+
+# --- API / backend ---
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+httpx
+
+# --- Video / audio processing ---
+ffmpeg-python
+opencv-python
+numpy
+
+# --- Speech-to-text ---
+faster-whisper
+
+# --- Detection / tracking ---
+ultralytics       # YOLOv8-face
+# Light-ASD: no PyPI package — vendor from source repo (add under src/detection/)
+supervision        # ByteTrack wrapper (or vendor ByteTrack directly)
+
+# --- ML runtime (install separately with correct CUDA build) ---
+# torch
+# torchvision
+
+# --- Campaign / Whop integration ---
+requests
+
+# --- Dev / testing ---
+pytest

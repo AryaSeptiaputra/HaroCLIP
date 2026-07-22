@@ -1,0 +1,64 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- ML model weights & caches ---
+models/*
+!models/.gitkeep
+*.pt
+*.pth
+*.onnx
+*.bin
+*.safetensors
+.cache/
+weights/
+checkpoints/
+
+# --- Video / media data (large files) ---
+data/*
+!data/.gitkeep
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.wav
+*.mp3
+
+# --- Logs / job artifacts ---
+*.log
+logs/
+outputs/
+tmp/
+*.tmp
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Frontend (future) ---
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
+frontend/build/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
