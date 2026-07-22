@@ -1,0 +1,72 @@
+.panel {
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.empty {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.linkType {
+  font-size: 13px;
+  color: var(--text);
+  text-transform: capitalize;
+}
+
+.url {
+  margin: 0 0 14px;
+  font-size: 14px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+}
+
+.meta dt {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.meta dd {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-h);
+}
+
+.errorBox {
+  padding: 10px 12px;
+  background: var(--status-danger-bg);
+  border-radius: 6px;
+}
+
+.errorStage {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--status-danger-text);
+}
+
+.errorMessage {
+  margin: 0;
+  font-size: 14px;
+  color: var(--status-danger-text);
+}
+
+.message {
+  font-size: 14px;
+  color: var(--text);
+}

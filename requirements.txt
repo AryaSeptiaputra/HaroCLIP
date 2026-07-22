@@ -29,5 +29,11 @@ supervision        # ByteTrack wrapper (or vendor ByteTrack directly)
 # --- Campaign / Whop integration ---
 requests
 
+# --- Ingestion / link resolution ---
+yt-dlp
+
+# --- Persistence ---
+sqlalchemy
+
 # --- Dev / testing ---
 pytest

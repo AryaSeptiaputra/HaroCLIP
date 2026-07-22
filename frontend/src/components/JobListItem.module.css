@@ -1,0 +1,51 @@
+.item {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.item + .item {
+  margin-top: 8px;
+}
+
+.selected {
+  border-color: var(--accent-border);
+}
+
+.select {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-h);
+}
+
+.label {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remove {
+  padding: 0 14px;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.remove:hover {
+  color: var(--status-danger-text);
+}

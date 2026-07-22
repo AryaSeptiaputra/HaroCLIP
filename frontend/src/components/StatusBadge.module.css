@@ -1,0 +1,27 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.pending,
+.validating {
+  background: var(--status-warning-bg);
+  color: var(--status-warning-text);
+}
+
+.ready {
+  background: var(--status-success-bg);
+  color: var(--status-success-text);
+}
+
+.failed,
+.not_found {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-text);
+}
