@@ -21,15 +21,23 @@ them into structured data that drives clip generation.
 
 ## Constraints
 
-- Target hardware: single GPU workstation, **24GB VRAM budget**. Model choices and
-  batch sizes need to respect this — no assuming multi-GPU or unlimited VRAM.
+- Compute is **rented on vast.ai**, not run on local hardware (limited local resources).
+  Target: RTX 4090/3090, **24GB VRAM budget**, on-demand (not interruptible/spot) instances
+  spun up only when a job runs — not kept always-on. Model choices and batch sizes need to
+  respect the 24GB ceiling. Full sizing rationale: `docs/hardware-spec.md`.
 
 ## Current status
 
-Project scaffolding complete: folder structure, git repo, `.gitignore`, README,
-skeleton `requirements.txt`, `.env.example`. No pipeline code written yet. No heavy
+`main` is kept intentionally minimal: README, project docs, scaffolding/config
+(`.gitignore`, skeleton `requirements.txt`, `.env.example`), and the empty folder
+structure — no feature implementation code lives directly on `main`. No heavy
 dependencies (torch, ultralytics weights, whisper models) installed yet — deferred
-until we start implementation to keep install choices tied to actual GPU/CUDA setup.
+until implementation to keep install choices tied to actual GPU/CUDA setup.
+
+Actual module implementation happens on dedicated branches (see "Git branching &
+workflow" below). The video ingestion module (link submission → ffprobe/yt-dlp
+metadata validation → job record, plus a React/Vite/TS frontend) is built and
+verified on the `ingestion-module` branch — not yet merged to `main`.
 
 ## Architecture
 
@@ -46,3 +54,15 @@ Planned across 5 phases (details TBD as implementation proceeds).
 - Confirm before installing heavy dependencies (model weights, CUDA-specific torch
   builds) — these are large/slow and GPU-specific.
 - Don't start implementing a phase without explicit direction on which one.
+
+## Git branching & workflow
+
+- Remote: `https://github.com/AryaSeptiaputra/HaroCLIP.git`
+- `main` stays minimal — README, project docs/config (this file, `docs/`,
+  `requirements.txt` skeleton, `.env.example`, `.gitignore`), and the empty folder
+  structure. No module implementation code is committed directly to `main`.
+- Each module's implementation progress is built and pushed on its own branch, named
+  after the module (e.g. `ingestion-module` for the video ingestion module — backend
+  + frontend). Work in progress lives there until it's ready to fold back into `main`.
+- Merge-back policy (PR review vs. direct merge, when to merge) is not decided yet —
+  revisit once a module branch is ready to land.
