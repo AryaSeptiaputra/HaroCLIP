@@ -14,10 +14,10 @@ them into structured data that drives clip generation.
 - **ByteTrack** — object/face tracking
 - **ffmpeg** — rendering/video processing
 - **FastAPI** — backend API layer (webhook ingestion from Whop, job orchestration)
-- Frontend: not yet decided, planned for later (dashboard for brief review / clip
-  approval) — `frontend/` is currently a placeholder
+- Frontend: **React + Vite + TypeScript** (decided on this branch, see `frontend/README.md`)
 - Python 3.13, venv (not conda)
-- Dependency file: `requirements.txt` (skeleton only — heavy ML deps not yet installed)
+- Dependency file: `requirements.txt` (heavy ML deps still not installed; `yt-dlp` +
+  `sqlalchemy` added for the ingestion module)
 
 ## Constraints
 
@@ -28,16 +28,20 @@ them into structured data that drives clip generation.
 
 ## Current status
 
-`main` is kept intentionally minimal: README, project docs, scaffolding/config
-(`.gitignore`, skeleton `requirements.txt`, `.env.example`), and the empty folder
-structure — no feature implementation code lives directly on `main`. No heavy
-dependencies (torch, ultralytics weights, whisper models) installed yet — deferred
-until implementation to keep install choices tied to actual GPU/CUDA setup.
+This branch (`ingestion-module`) has a working vertical slice of the video ingestion
+module, verified end-to-end:
+- Backend (`src/ingestion/`, `src/api/`): `POST /ingestion/jobs` accepts a video URL
+  (direct file link or platform link like YouTube/TikTok), validates metadata async via
+  ffprobe/yt-dlp (no download at this stage — full download is deferred to the vast.ai
+  processing stage), and persists job state in SQLite. `GET /ingestion/jobs/{id}` polls
+  for status.
+- Frontend (`frontend/`): React/Vite/TS UI to submit a link and watch job status resolve
+  (list + detail view), polling the backend every 3s, jobs tracked in `localStorage`.
 
-Actual module implementation happens on dedicated branches (see "Git branching &
-workflow" below). The video ingestion module (link submission → ffprobe/yt-dlp
-metadata validation → job record, plus a React/Vite/TS frontend) is built and
-verified on the `ingestion-module` branch — not yet merged to `main`.
+No heavy ML dependencies (torch, ultralytics weights, whisper models) installed yet —
+deferred until those pipeline stages are implemented, to keep install choices tied to
+actual GPU/CUDA setup. `main` stays minimal (docs/config only, no code) — see "Git
+branching & workflow" below.
 
 ## Architecture
 
