@@ -52,6 +52,17 @@ until a module actually needs them with a real GPU/CUDA setup. (Lesson learned o
 transitively because the original skeleton had them uncommented — always check what's
 already uncommented before running a blanket install.)
 
+This branch (`processing-module`) adds the download & pre-processing stage, verified
+end-to-end: given a `ready` `IngestionJob`, `python -m src.processing.run --job-id <id>
+[--force]` downloads the full video (re-resolving fresh via yt-dlp for platform links —
+`download=True` this time, unlike ingestion's probe-only `download=False` — or streaming
+a direct URL via `httpx`) to `data/videos/<ingestion_job_id>/source.<ext>`, then extracts
+its audio track to `audio.wav` (16kHz mono PCM, faster-whisper's native input format) via
+an `ffmpeg` subprocess. Tracked in its own `processing_jobs` table (`src/processing/`),
+referencing `ingestion_jobs.id` by plain string (no real FK). CLI-only by design — this
+runs once per vast.ai GPU instance boot for a specific job, not as an always-on HTTP
+service like ingestion/campaign. Idempotent without `--force`.
+
 ## Architecture
 
 Planned across 5 phases (details TBD as implementation proceeds).
