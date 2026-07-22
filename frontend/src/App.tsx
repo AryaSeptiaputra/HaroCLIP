@@ -1,45 +1,33 @@
 import { useState } from "react";
-import { SubmitJobForm } from "./components/SubmitJobForm";
-import { JobList } from "./components/JobList";
-import { JobDetail } from "./components/JobDetail";
-import { useTrackedJobs } from "./hooks/useTrackedJobs";
+import { IngestionView } from "./IngestionView";
+import { CampaignView } from "./CampaignView";
 import "./App.css";
 
+type Tab = "ingestion" | "campaign";
+
 function App() {
-  const { trackedJobs, addJobId, removeJobId } = useTrackedJobs();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  const selectedJob = trackedJobs.find((t) => t.id === selectedId) ?? null;
-
-  const handleRemove = (id: string) => {
-    removeJobId(id);
-    if (selectedId === id) setSelectedId(null);
-  };
-
-  const handleJobCreated = (id: string) => {
-    addJobId(id);
-    setSelectedId(id);
-  };
+  const [tab, setTab] = useState<Tab>("ingestion");
 
   return (
     <main className="app">
-      <h1>HaroClip Ingestion</h1>
-      <SubmitJobForm onJobCreated={handleJobCreated} />
-      <div className="layout">
-        <section>
-          <h2>Jobs</h2>
-          <JobList
-            trackedJobs={trackedJobs}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onRemove={handleRemove}
-          />
-        </section>
-        <section>
-          <h2>Details</h2>
-          <JobDetail trackedJob={selectedJob} />
-        </section>
-      </div>
+      <h1>HaroClip</h1>
+      <nav className="tabs">
+        <button
+          className={`tab ${tab === "ingestion" ? "tabActive" : ""}`}
+          type="button"
+          onClick={() => setTab("ingestion")}
+        >
+          Ingestion
+        </button>
+        <button
+          className={`tab ${tab === "campaign" ? "tabActive" : ""}`}
+          type="button"
+          onClick={() => setTab("campaign")}
+        >
+          Campaign Briefs
+        </button>
+      </nav>
+      {tab === "ingestion" ? <IngestionView /> : <CampaignView />}
     </main>
   );
 }

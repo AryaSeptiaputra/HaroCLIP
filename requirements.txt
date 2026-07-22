@@ -14,13 +14,13 @@ ffmpeg-python
 opencv-python
 numpy
 
-# --- Speech-to-text ---
-faster-whisper
+# --- Speech-to-text (heavy, GPU-oriented — confirm before installing) ---
+# faster-whisper
 
-# --- Detection / tracking ---
-ultralytics       # YOLOv8-face
+# --- Detection / tracking (heavy, GPU-oriented — confirm before installing) ---
+# ultralytics       # YOLOv8-face
 # Light-ASD: no PyPI package — vendor from source repo (add under src/detection/)
-supervision        # ByteTrack wrapper (or vendor ByteTrack directly)
+# supervision        # ByteTrack wrapper (or vendor ByteTrack directly)
 
 # --- ML runtime (install separately with correct CUDA build) ---
 # torch
@@ -34,6 +34,9 @@ yt-dlp
 
 # --- Persistence ---
 sqlalchemy
+
+# --- Campaign brief uploads ---
+python-multipart
 
 # --- Dev / testing ---
 pytest

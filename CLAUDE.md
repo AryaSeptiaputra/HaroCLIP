@@ -14,10 +14,11 @@ them into structured data that drives clip generation.
 - **ByteTrack** — object/face tracking
 - **ffmpeg** — rendering/video processing
 - **FastAPI** — backend API layer (webhook ingestion from Whop, job orchestration)
-- Frontend: **React + Vite + TypeScript** (decided on this branch, see `frontend/README.md`)
+- Frontend: **React + Vite + TypeScript**, single app with a top-level tab switch
+  between modules — see `frontend/README.md`
 - Python 3.13, venv (not conda)
-- Dependency file: `requirements.txt` (heavy ML deps still not installed; `yt-dlp` +
-  `sqlalchemy` added for the ingestion module)
+- Dependency file: `requirements.txt` (heavy ML deps still not installed; `yt-dlp`,
+  `sqlalchemy`, `python-multipart` added for the ingestion/campaign modules)
 
 ## Constraints
 
@@ -28,20 +29,28 @@ them into structured data that drives clip generation.
 
 ## Current status
 
-This branch (`ingestion-module`) has a working vertical slice of the video ingestion
-module, verified end-to-end:
-- Backend (`src/ingestion/`, `src/api/`): `POST /ingestion/jobs` accepts a video URL
-  (direct file link or platform link like YouTube/TikTok), validates metadata async via
-  ffprobe/yt-dlp (no download at this stage — full download is deferred to the vast.ai
-  processing stage), and persists job state in SQLite. `GET /ingestion/jobs/{id}` polls
-  for status.
-- Frontend (`frontend/`): React/Vite/TS UI to submit a link and watch job status resolve
-  (list + detail view), polling the backend every 3s, jobs tracked in `localStorage`.
+`main` now carries two verified vertical slices, merged in from their module branches:
 
-No heavy ML dependencies (torch, ultralytics weights, whisper models) installed yet —
-deferred until those pipeline stages are implemented, to keep install choices tied to
-actual GPU/CUDA setup. `main` stays minimal (docs/config only, no code) — see "Git
-branching & workflow" below.
+- **Ingestion** (`src/ingestion/`, `src/api/routers/ingestion.py`): `POST
+  /ingestion/jobs` validates a submitted video link (direct file or platform link) via
+  ffprobe/yt-dlp — no download at this stage, that's deferred to the processing stage —
+  and persists status in SQLite (`pending`/`validating`/`ready`/`failed`). `GET
+  /ingestion/jobs/{id}` polls for status.
+- **Campaign briefs** (`src/campaign/`, `src/api/routers/campaign.py`): `POST
+  /campaign/briefs` accepts a brief as pasted text or an uploaded PDF/DOCX/TXT file
+  (mutually exclusive, one required, plus a required `title`), storing it as-is — no
+  structured extraction yet (deferred to a future module, since real briefs vary too
+  much in format). List/get/file-download endpoints included.
+- Frontend (`frontend/`): single React/Vite/TS app with a top-level tab switch between
+  "Ingestion" and "Campaign Briefs" views; each retains its own component tree and
+  state, ported over unchanged from its module branch.
+
+Heavy ML dependencies (`faster-whisper`, `ultralytics`, `supervision`, `torch`,
+`torchvision`) remain commented out in `requirements.txt` and not installed — deferred
+until a module actually needs them with a real GPU/CUDA setup. (Lesson learned on
+`campaign-module`: a blanket `pip install -r requirements.txt` once pulled these in
+transitively because the original skeleton had them uncommented — always check what's
+already uncommented before running a blanket install.)
 
 ## Architecture
 
@@ -62,11 +71,14 @@ Planned across 5 phases (details TBD as implementation proceeds).
 ## Git branching & workflow
 
 - Remote: `https://github.com/AryaSeptiaputra/HaroCLIP.git`
-- `main` stays minimal — README, project docs/config (this file, `docs/`,
-  `requirements.txt` skeleton, `.env.example`, `.gitignore`), and the empty folder
-  structure. No module implementation code is committed directly to `main`.
 - Each module's implementation progress is built and pushed on its own branch, named
-  after the module (e.g. `ingestion-module` for the video ingestion module — backend
-  + frontend). Work in progress lives there until it's ready to fold back into `main`.
-- Merge-back policy (PR review vs. direct merge, when to merge) is not decided yet —
-  revisit once a module branch is ready to land.
+  after the module (e.g. `ingestion-module`, `campaign-module`, `processing-module`).
+- **Merge-back policy (decided):** a module branch merges into `main` via `git merge
+  --no-ff <branch>` once its vertical slice is built and verified end-to-end — no PR
+  review step at this project's current single-developer stage (revisit if that
+  changes). Merging isn't strictly tied to completion order — it's triggered by a real
+  dependency need (e.g. `ingestion-module` and `campaign-module` merged into `main`
+  together specifically because `processing-module` needs direct access to
+  `IngestionJob`'s model/schema, which isolated per-branch development couldn't provide).
+- A module branch may stay unmerged for a while if nothing later depends on it yet —
+  that's fine, merging is need-driven, not automatic on completion.

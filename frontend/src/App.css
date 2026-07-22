@@ -21,3 +21,35 @@
   font-size: 16px;
   margin-bottom: 10px;
 }
+
+.hint {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.hint.error {
+  color: var(--status-danger-text);
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  padding: 8px 16px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+
+.tabActive {
+  color: var(--text-h);
+  font-weight: 500;
+  border-bottom-color: var(--accent);
+}

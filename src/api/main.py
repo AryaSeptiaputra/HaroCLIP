@@ -5,6 +5,7 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.api.routers.campaign import router as campaign_router
 from src.api.routers.ingestion import router as ingestion_router
 from src.utils.db import init_db
 
@@ -25,3 +26,4 @@ def on_startup() -> None:
 
 
 app.include_router(ingestion_router)
+app.include_router(campaign_router)
