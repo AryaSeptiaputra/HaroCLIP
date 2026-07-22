@@ -14,10 +14,12 @@ them into structured data that drives clip generation.
 - **ByteTrack** — object/face tracking
 - **ffmpeg** — rendering/video processing
 - **FastAPI** — backend API layer (webhook ingestion from Whop, job orchestration)
-- Frontend: not yet decided, planned for later (dashboard for brief review / clip
-  approval) — `frontend/` is currently a placeholder
+- Frontend: **React + Vite + TypeScript** (decided independently on this branch and on
+  `ingestion-module`; each module branch currently scaffolds its own frontend project —
+  see "Git branching & workflow")
 - Python 3.13, venv (not conda)
-- Dependency file: `requirements.txt` (skeleton only — heavy ML deps not yet installed)
+- Dependency file: `requirements.txt` (heavy ML deps still not installed; `sqlalchemy` +
+  `python-multipart` added for the campaign brief module)
 
 ## Constraints
 
@@ -28,16 +30,28 @@ them into structured data that drives clip generation.
 
 ## Current status
 
-`main` is kept intentionally minimal: README, project docs, scaffolding/config
-(`.gitignore`, skeleton `requirements.txt`, `.env.example`), and the empty folder
-structure — no feature implementation code lives directly on `main`. No heavy
-dependencies (torch, ultralytics weights, whisper models) installed yet — deferred
-until implementation to keep install choices tied to actual GPU/CUDA setup.
+This branch (`campaign-module`) has a working vertical slice of the campaign brief
+module, verified end-to-end:
+- Backend (`src/campaign/`, `src/api/`): `POST /campaign/briefs` accepts a brief as
+  either pasted free text or an uploaded PDF/DOCX/TXT file (mutually exclusive, one
+  required, plus a required `title`), storing it as-is — no parsing/extraction into
+  structured data yet (deferred to a future module, since real briefs have highly
+  variable formats). `GET /campaign/briefs` lists all briefs, `GET /campaign/briefs/{id}`
+  fetches one, `GET /campaign/briefs/{id}/file` downloads an uploaded file.
+- Frontend (`frontend/`): React/Vite/TS UI — submit form (text/file mode toggle), brief
+  list, detail view (inline text or file metadata + download link).
 
-Actual module implementation happens on dedicated branches (see "Git branching &
-workflow" below). The video ingestion module (link submission → ffprobe/yt-dlp
-metadata validation → job record, plus a React/Vite/TS frontend) is built and
-verified on the `ingestion-module` branch — not yet merged to `main`.
+Branched from `main`, independent of `ingestion-module` — does not include ingestion
+code (per the branching convention below), so this branch's `src/api/main.py` and
+`frontend/` were scaffolded fresh rather than extending ingestion's.
+
+No heavy ML dependencies (torch, ultralytics weights, whisper models) installed — a
+stray `pip install -r requirements.txt` earlier pulled in torch/ultralytics/faster-whisper
+transitively because the original skeleton had those uncommented; they've been removed
+from the venv and commented out in `requirements.txt` (matching how `torch`/`torchvision`
+were already handled) until a module actually needs them with a real GPU/CUDA setup.
+**Lesson: check what's already uncommented in `requirements.txt` before running a blanket
+`pip install -r requirements.txt`** — don't assume it only installs what you just added.
 
 ## Architecture
 
