@@ -17,6 +17,11 @@ numpy
 # --- Speech-to-text (heavy, GPU-oriented — confirm before installing) ---
 # faster-whisper
 
+# --- Highlight detection LLM (heavy, GPU-oriented — confirm before installing) ---
+# transformers      # loads Qwen2.5-7B-Instruct for highlight-candidate generation
+# accelerate
+# bitsandbytes      # 4-bit quantization
+
 # --- Detection / tracking (heavy, GPU-oriented — confirm before installing) ---
 # ultralytics       # YOLOv8-face
 # Light-ASD: no PyPI package — vendor from source repo (add under src/detection/)
