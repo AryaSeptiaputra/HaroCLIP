@@ -7,7 +7,7 @@ from src.reframe.enums import ReframeStatus
 from src.reframe.exceptions import ReframeError
 from src.reframe.models import ReframeJob
 from src.reframe.renderer import render_reframed_clip
-from src.reframe.speaker_selection import select_primary_track
+from src.reframe.speaker_selection import select_primary_track_with_asd
 from src.reframe.storage import reframe_output_path
 from src.tracking.face_tracker import FaceTracker
 from src.utils.db import DATA_DIR
@@ -59,7 +59,7 @@ def _detect_and_track(video_path):
         cap.release()
         detector.close()
 
-    return all_tracks, width, height, total_frames
+    return all_tracks, width, height, total_frames, fps
 
 
 def run_reframe(db: Session, highlight_clip_id: str, force: bool = False) -> ReframeJob:
@@ -80,7 +80,7 @@ def run_reframe(db: Session, highlight_clip_id: str, force: bool = False) -> Ref
         job.error_message = None
         db.commit()
 
-        all_tracks, width, height, total_frames = _detect_and_track(video_path)
+        all_tracks, width, height, total_frames, fps = _detect_and_track(video_path)
 
         job.status = ReframeStatus.TRACKING
         db.commit()
@@ -88,7 +88,7 @@ def run_reframe(db: Session, highlight_clip_id: str, force: bool = False) -> Ref
         job.status = ReframeStatus.CROPPING
         db.commit()
 
-        primary_track_id = select_primary_track(all_tracks)
+        primary_track_id = select_primary_track_with_asd(video_path, all_tracks, fps)
         primary_boxes = [t for t in all_tracks if t.track_id == primary_track_id]
         crop_w = compute_crop_width(width, height)
         crop_path = build_crop_path(primary_boxes, width, height, total_frames)

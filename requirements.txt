@@ -24,7 +24,8 @@ numpy
 
 # --- Detection / tracking (heavy, GPU-oriented — confirm before installing) ---
 # ultralytics       # YOLOv8-face
-# Light-ASD: no PyPI package — vendor from source repo (add under src/detection/)
+# Light-ASD: no PyPI package — vendored under src/detection/light_asd/ (MIT, see NOTICE.md there)
+# python_speech_features   # MFCC extraction for Light-ASD (small, pure-Python, but only used by the ASD path)
 # supervision        # ByteTrack wrapper (or vendor ByteTrack directly)
 
 # --- ML runtime (install separately with correct CUDA build) ---

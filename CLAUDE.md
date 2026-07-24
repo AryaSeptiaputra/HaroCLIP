@@ -80,32 +80,48 @@ rendering: for every `HighlightClip`, `python -m src.reframe.run --job-id
 frame count, not full framerate — `docs/hardware-spec.md`), runs YOLOv8-face
 (`src/detection/face_detector.py`) on each sampled frame, feeds detections through
 ByteTrack (`src/tracking/face_tracker.py`, via `supervision`) to get consistent face
-tracks, picks a **primary speaker via a heuristic** (`src/reframe/speaker_selection.py`
-— largest total on-screen area, tie-break by longest-persisting track), builds a
-smoothed/interpolated horizontal crop path (`src/reframe/crop_path.py` — pure
-numpy math, no I/O) for a fixed-height 9:16 vertical strip that pans to follow the
-speaker (never crops vertically), then renders it via OpenCV (per-frame crop+resize to
-1080×1920) with a final ffmpeg pass to remux the original audio
-(`src/reframe/renderer.py`). Tracked in `reframe_jobs` (`src/reframe/`), keyed by
-`highlight_clip_id` — one reframe job per clip, unlike other modules' per-ingestion-job
-granularity (the CLI still takes `--job-id <ingestion_job_id>` for UX consistency and
-loops over that job's clips internally).
+tracks, picks a **primary speaker** (`src/reframe/speaker_selection.py` —
+`select_primary_track_with_asd()`, see below), builds a smoothed/interpolated
+horizontal crop path (`src/reframe/crop_path.py` — pure numpy math, no I/O) for a
+fixed-height 9:16 vertical strip that pans to follow the speaker (never crops
+vertically), then renders it via OpenCV (per-frame crop+resize to 1080×1920) with a
+final ffmpeg pass to remux the original audio (`src/reframe/renderer.py`). Tracked in
+`reframe_jobs` (`src/reframe/`), keyed by `highlight_clip_id` — one reframe job per
+clip, unlike other modules' per-ingestion-job granularity (the CLI still takes
+`--job-id <ingestion_job_id>` for UX consistency and loops over that job's clips
+internally). **YOLOv8-face weights are a manual prerequisite** (not pip-installable):
+`YOLOV8_FACE_WEIGHTS_PATH` env var, default `data/models/yolov8n-face-lindevs.pt` —
+source: community repo `lindevs/yolov8-face` (WIDERFace-trained, MIT-licensed), must be
+downloaded onto the vast.ai instance manually, same category as the `ffmpeg` binary
+being a documented prerequisite rather than a `requirements.txt` entry.
 
-**Heuristic active-speaker selection is a deliberate placeholder, not real Light-ASD.**
-Researched during planning (fetched the actual upstream `Junhua-Liao/Light-ASD` repo):
-its own demo does its own internal face detection/tracking rather than accepting
-external tracks, so real integration means vendoring `ASD.py`/`model/Model.py`/
-`model/Encoder.py`/`model/Classifier.py` and hand-implementing its exact preprocessing
-(112×112 grayscale face crops; MFCC audio at a strict 4-audio-frames:1-video-frame
-alignment; `module.`-prefix checkpoint loading) — none of which could be exercised
-locally (no GPU, no weights), unlike the rest of this module. User chose to ship the
-swappable heuristic now (`select_primary_track()` is the single isolated seam meant to
-be replaced later) and defer real Light-ASD to a follow-up. **YOLOv8-face weights are a
-manual prerequisite** (not pip-installable): `YOLOV8_FACE_WEIGHTS_PATH` env var,
-default `data/models/yolov8n-face-lindevs.pt` — source: community repo
-`lindevs/yolov8-face` (WIDERFace-trained, MIT-licensed), must be downloaded onto the
-vast.ai instance manually, same category as the `ffmpeg` binary being a documented
-prerequisite rather than a `requirements.txt` entry.
+**Real Light-ASD is vendored** (`src/detection/light_asd/`, MIT-licensed, upstream
+`github.com/Junhua-Liao/Light-ASD`, attribution + deviations documented in
+`src/detection/light_asd/NOTICE.md`) — fetched verbatim from the real upstream source
+(not paraphrased) during planning, including `Columbia_test.py`'s exact
+`evaluate_network`/`crop_video` algorithm, so the integration in
+`src/reframe/asd_scoring.py` (`LightASDScorer`) is a faithful port: smoothed/padded
+square face crop per frame (112×112 grayscale, median-filtered center/size), MFCC audio
+(13 coefs, 4-audio-frames:1-video-frame alignment), multi-duration ensemble scoring,
+raw-logit score thresholded at 0. One correctness fix beyond upstream: `reframe-module`
+only samples faces at 5fps, but Light-ASD's temporal convs expect dense ~25fps input,
+so `asd_scoring.py` resamples the interpolated crop sequence onto a synthetic 25fps
+timeline (by time, not by native frame index) before scoring — feeding it the raw 5fps
+samples would have silently produced garbage scores. `asd.py` (vendored, trimmed) drops
+upstream's training-only `train_network`/CSV-`evaluate_network` (avoids a needless
+`pandas` dependency); model construction and weight loading are otherwise
+byte-identical to upstream except `loadParameters` gains a `map_location` for more
+portable checkpoint loading.
+
+`speaker_selection.select_primary_track_with_asd(video_path, tracks, source_fps)` tries
+real Light-ASD scoring per candidate face track (mean raw-logit score, highest wins),
+and **falls back to the original heuristic** (`select_primary_track()` — largest
+on-screen area, tie-break by duration) on any failure: missing deps (`ImportError`),
+missing weights, or a scoring exception. This means the pipeline behaves identically to
+before this change until a real GPU instance actually has `torch`/
+`python_speech_features` installed and the vendored weights in place — zero risk of
+regressing the already-verified heuristic path. `service.py`'s single call site now
+calls this function instead of the raw heuristic directly.
 
 **Verification caveat (highlights-module, still current):** local dev has no CUDA GPU,
 so faster-whisper transcription and the Qwen2.5-7B highlight-detection LLM were only
@@ -120,8 +136,25 @@ fallback all verified with hand-built fake data). `renderer.render_reframed_clip
 run **for real** (not mocked) against a synthetic test video — confirmed exact
 1080×1920 output, correct duration, audio remuxed correctly. The full
 `service.run_reframe` status flow / idempotency / `--force` behavior was verified with
-`FaceDetector`/`FaceTracker` stubbed out (those two remain unverified for real — need
-actual YOLOv8-face weights + a real GPU — everything downstream of them is verified).
+`FaceDetector`/`FaceTracker` stubbed out. For the Light-ASD addition specifically:
+`asd_scoring._median_filter` is pure math, unit-tested; `select_primary_track_with_asd`'s
+fallback-to-heuristic path was exercised **for real** (torch genuinely absent locally,
+real `ModuleNotFoundError` caught), and the full `service.run_reframe` flow was re-run
+end-to-end with the new call site wired in as a regression check. `FaceDetector`/
+`FaceTracker`/real Light-ASD scoring itself remain unverified for real — need actual
+YOLOv8-face weights + the vendored Light-ASD weights + `torch`/`python_speech_features`
+installed + a real GPU.
+
+**Tooling note (discovered this session, cost real debugging time):** this machine has
+a stray global Python 3.10 install
+(`C:\Users\Arya\AppData\Local\Programs\Python\Python310\python.exe`) with unrelated
+leftover ML packages (including a partially-broken `torch` — importable but
+`torch.nn.functional` fails) that Git Bash's `python`/`python3` on `PATH` resolve to by
+default. The actual project venv is `C:\Project\HaroCLIP\venv` (Python 3.13, matches
+this doc's dependency list exactly — confirmed clean, no torch at all). **Always
+invoke `C:/Project/HaroCLIP/venv/Scripts/python.exe` explicitly for any local
+verification**, not bare `python`/`python3` — otherwise results may be silently
+contaminated by whatever happens to be in the global install.
 
 ## Architecture
 
@@ -130,13 +163,12 @@ Planned across 5 phases (details TBD as implementation proceeds).
 ## Next steps (not yet started — waiting on direction)
 
 1. Run the full pipeline end-to-end on a real vast.ai GPU instance with the manually-
-   downloaded YOLOv8-face weights in place: transcription accuracy, LLM highlight
-   quality, YOLOv8-face/ByteTrack behavior on real footage, actual crop quality, and
-   actual VRAM usage vs `docs/hardware-spec.md` estimates — nothing beyond the
-   mocked/stubbed local checks has run for real yet.
-2. Swap `src/reframe/speaker_selection.py`'s heuristic for real vendored Light-ASD
-   (`Junhua-Liao/Light-ASD`) once there's a real GPU to develop/test the audio-visual
-   preprocessing against — `select_primary_track()` is the intended seam.
+   downloaded YOLOv8-face weights in place and `torch`/`python_speech_features`
+   installed: transcription accuracy, LLM highlight quality, YOLOv8-face/ByteTrack
+   behavior on real footage, real Light-ASD scoring correctness, actual crop quality,
+   and actual VRAM usage vs `docs/hardware-spec.md` estimates — nothing beyond the
+   mocked/stubbed local checks has run for real yet. This is now the single remaining
+   validation step covering all four pipeline stages.
 
 ## Working conventions
 
