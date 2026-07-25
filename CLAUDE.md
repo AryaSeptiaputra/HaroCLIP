@@ -2,9 +2,10 @@
 
 ## What this is
 
-HaroClip automatically generates video clips/highlights, aimed at creator/marketing
-campaign use cases. Includes integration with Whop to pull campaign briefs and turn
-them into structured data that drives clip generation.
+HaroClip automatically generates video clips/highlights from a source video, aimed at
+creator/marketing use cases: submit a video link, it downloads the video, transcribes
+it, uses a local LLM to find "hook"-worthy highlight segments, and renders each as a
+dynamic vertical-crop clip that follows the speaker.
 
 ## Tech stack
 
@@ -15,12 +16,11 @@ them into structured data that drives clip generation.
 - **YOLOv8-face** (ultralytics) — face detection
 - **ByteTrack** — object/face tracking
 - **ffmpeg** — rendering/video processing
-- **FastAPI** — backend API layer (webhook ingestion from Whop, job orchestration)
-- Frontend: **React + Vite + TypeScript**, single app with a top-level tab switch
-  between modules — see `frontend/README.md`
+- **FastAPI** — backend API layer (job orchestration)
+- Frontend: **React + Vite + TypeScript** — see `frontend/README.md`
 - Python 3.13, venv (not conda)
 - Dependency file: `requirements.txt` (heavy ML deps still not installed; `yt-dlp`,
-  `sqlalchemy`, `python-multipart` added for the ingestion/campaign modules)
+  `sqlalchemy` added for the ingestion module)
 
 ## Constraints
 
@@ -38,12 +38,6 @@ them into structured data that drives clip generation.
   ffprobe/yt-dlp — no download at this stage, that's deferred to the processing stage —
   and persists status in SQLite (`pending`/`validating`/`ready`/`failed`). `GET
   /ingestion/jobs/{id}` polls for status.
-- **Campaign briefs** (`src/campaign/`, `src/api/routers/campaign.py`): `POST
-  /campaign/briefs` accepts a brief as pasted text or an uploaded PDF/DOCX/TXT file
-  (mutually exclusive, one required, plus a required `title`), storing it as-is — no
-  structured extraction yet. Status: likely to be removed later (per user, 2026-07-25)
-  — don't build new features that assume campaign briefs stick around (e.g. the
-  highlight-detection LLM prompt deliberately ignores brief content for this reason).
 - **Download & pre-processing** (`src/processing/`): given a `ready` `IngestionJob`,
   `python -m src.processing.run --job-id <id> [--force]` downloads the full video
   (re-resolving fresh via yt-dlp for platform links, or streaming a direct URL via
@@ -51,45 +45,58 @@ them into structured data that drives clip generation.
   track to `audio.wav` (16kHz mono PCM) via ffmpeg. Tracked in `processing_jobs`,
   referencing `ingestion_jobs.id` by plain string (no real FK). CLI-only, idempotent
   without `--force`.
-- Frontend (`frontend/`): single React/Vite/TS app with a top-level tab switch between
-  "Ingestion" and "Campaign Briefs" views. **UI work is paused** (per user, 2026-07-25)
-  until all backend modules are done — later modules (highlights and beyond) are
-  CLI-only for now, no frontend changes expected until that's revisited.
+- **Highlight detection** (`src/highlights/`, `src/transcription/`, `src/rendering/`):
+  given a `ready` `ProcessingJob`, `python -m src.highlights.run --job-id
+  <ingestion_job_id> [--force]` transcribes `audio.wav` via faster-whisper
+  (large-v3/int8), feeds the timestamped transcript to a **local LLM
+  (Qwen2.5-7B-Instruct, 4-bit via `transformers`+`bitsandbytes`)** prompted with
+  hand-designed "hook" principles (`src/highlights/prompt.py` — curiosity gap,
+  surprising claim, emotional peak, concrete insight, controversial opinion; clips
+  ~15-60s, natural sentence boundaries, self-contained) to get 5-10 ranked candidate
+  segments as strict JSON (`src/highlights/llm.py` parses + validates
+  timestamps/duration, drops malformed entries rather than failing the whole job), then
+  renders each as a static clip via ffmpeg (`src/rendering/clipper.py` — plain temporal
+  cut, `-ss`/`-t` as *input* options so re-encoding stays frame-accurate without the
+  `-ss`+`-to` absolute-timeline gotcha). Tracked in `highlight_jobs`/`highlight_clips`,
+  same loose string-reference convention as `processing_jobs`. **Local LLM choice was
+  an explicit user decision** (not an external API) — VRAM budget assumes sequential
+  load/free per stage (whisper freed before the LLM loads), see
+  `docs/hardware-spec.md`.
+- Frontend (`frontend/`): React/Vite/TS app, currently just the ingestion view (no more
+  tab shell — that was for switching to the now-removed campaign briefs module).
+  **UI work is paused** (per user, 2026-07-25) until all backend modules are done —
+  later modules (highlights and beyond) are CLI-only for now, no frontend changes
+  expected until that's revisited.
+
+**Campaign briefs module removed (2026-07-25, per user direction).** Previously
+accepted a brief as pasted text or an uploaded PDF/DOCX/TXT file and stored it as-is,
+with structured extraction deferred to a future module that never got built. Decided
+not to pursue this direction — removed from `main` (`src/campaign/`,
+`src/api/routers/campaign.py`, the campaign frontend view/components/hook, and the
+`requests`/`python-multipart` dependencies that existed only for it) rather than left
+half-built. The `campaign-module` branch itself is kept on GitHub as archived history,
+not deleted. If Whop integration or campaign-brief-driven highlight targeting comes
+back later, treat it as a fresh module, not a resurrection of this code.
 
 Heavy ML dependencies (`faster-whisper`, `transformers`/`accelerate`/`bitsandbytes`,
 `ultralytics`, `supervision`, `torch`, `torchvision`) remain commented out in
 `requirements.txt` and not installed — deferred until run on a real vast.ai GPU
-instance. (Lesson learned on `campaign-module`: a blanket `pip install -r
-requirements.txt` once pulled these in transitively because the original skeleton had
-them uncommented — always check what's already uncommented before running a blanket
-install.)
+instance. (Lesson learned early on: a blanket `pip install -r requirements.txt` once
+pulled these in transitively because the original skeleton had them uncommented —
+always check what's already uncommented before running a blanket install.)
 
-This branch (`highlights-module`) adds the first highlight-detection vertical slice:
-given a `ready` `ProcessingJob`, `python -m src.highlights.run --job-id <ingestion_job_id>
-[--force]` transcribes `audio.wav` via faster-whisper (`src/transcription/`,
-large-v3/int8), feeds the timestamped transcript to a **local LLM (Qwen2.5-7B-Instruct,
-4-bit via `transformers`+`bitsandbytes`)** prompted with hand-designed "hook" principles
-(`src/highlights/prompt.py` — curiosity gap, surprising claim, emotional peak, concrete
-insight, controversial opinion; clips ~15-60s, natural sentence boundaries,
-self-contained) to get 5-10 ranked candidate segments as strict JSON
-(`src/highlights/llm.py` parses + validates timestamps/duration, drops malformed
-entries rather than failing the whole job), then renders each as a static clip via
-ffmpeg (`src/rendering/clipper.py` — plain temporal cut, `-ss`/`-t` as *input* options
-so re-encoding stays frame-accurate without the `-ss`+`-to` absolute-timeline gotcha;
-no dynamic cropping/face-tracking yet, that's a later phase). Tracked in
-`highlight_jobs`/`highlight_clips` (`src/highlights/`), same loose string-reference
-convention as `processing_jobs`. **Local LLM choice was an explicit user decision**
-(not an external API) — VRAM budget assumes sequential load/free per stage (whisper
-freed before the LLM loads), see `docs/hardware-spec.md`.
-
-**Verification caveat:** local dev has no CUDA GPU, so only the non-GPU parts were
-verified this session — package imports cleanly with heavy deps absent (lazy imports,
-same pattern as `processing.downloader`), prompt template rendering, `parse_candidates`
-against hand-written fake LLM responses (valid/malformed/out-of-range), `render_clip`
-against a real synthetic test video, and the full `service.run_highlight_detection`
-status flow / idempotency / `--force` behavior with `transcribe`/`generate_candidates`
-mocked out. **Actual transcription accuracy and actual LLM highlight quality are
-unverified** — needs a real vast.ai GPU instance run before trusting the output.
+**Verification caveat:** local dev has no CUDA GPU, so only the non-GPU parts of
+highlight detection were verified — package imports cleanly with heavy deps absent
+(lazy imports, same pattern as `processing.downloader`), prompt template rendering,
+`parse_candidates` against hand-written fake LLM responses (valid/malformed/
+out-of-range), `render_clip` against a real synthetic test video, and the full
+`service.run_highlight_detection` status flow / idempotency / `--force` behavior with
+`transcribe`/`generate_candidates` mocked out. **Actual transcription accuracy and
+actual LLM highlight quality are unverified** on `main` — needs a real vast.ai GPU
+instance run before trusting the output. (Separately, on the still-unmerged
+`reframe-module` branch — dynamic-crop rendering, face detection/tracking, real
+Light-ASD — real non-mocked local verification with small model substitutes has since
+been done; see that branch's history if picking this back up.)
 
 ## Architecture
 
@@ -97,12 +104,16 @@ Planned across 5 phases (details TBD as implementation proceeds).
 
 ## Next steps (not yet started — waiting on direction)
 
-1. Run the highlights pipeline end-to-end on a real vast.ai GPU instance (transcription
-   accuracy, LLM highlight quality, actual VRAM usage vs `docs/hardware-spec.md`
-   estimates) — nothing beyond the mocked/stubbed local checks has run for real yet.
-2. Face detection / active speaker detection / tracking (`src/detection/`,
-   `src/tracking/`) for dynamic vertical-crop rendering — current rendering is a static
-   temporal cut only.
+1. Decide whether/when to merge `reframe-module` into `main` — it already builds face
+   detection/tracking/dynamic-crop rendering and real Light-ASD (item 2 below), with
+   real local verification done, but isn't merged yet.
+2. ~~Face detection / active speaker detection / tracking for dynamic vertical-crop
+   rendering~~ — done on `reframe-module` (unmerged).
+3. Run the full pipeline end-to-end on a real vast.ai GPU instance (transcription
+   accuracy, LLM highlight quality at full model size, real-footage detection/
+   tracking/ASD accuracy, actual VRAM usage vs `docs/hardware-spec.md` estimates) —
+   nothing beyond local checks (mocked on `main`, real-small-model on `reframe-module`)
+   has run at production scale yet.
 
 ## Working conventions
 

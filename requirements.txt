@@ -31,17 +31,11 @@ numpy
 # torch
 # torchvision
 
-# --- Campaign / Whop integration ---
-requests
-
 # --- Ingestion / link resolution ---
 yt-dlp
 
 # --- Persistence ---
 sqlalchemy
-
-# --- Campaign brief uploads ---
-python-multipart
 
 # --- Dev / testing ---
 pytest
