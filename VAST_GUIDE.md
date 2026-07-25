@@ -30,7 +30,13 @@ See `docs/hardware-spec.md` for the full breakdown. Short version:
   concurrently. A 24GB card (RTX 4090/3090) is a safety margin, not a requirement, and
   costs more per hour. Pick based on your remaining budget.
 - **vCPU/RAM**: 8+ cores, 32GB+ RAM (ffmpeg decode/encode benefits from multi-core).
-- **Storage**: 100GB+ (source video + model weights + output clips).
+- **Storage: ~40-50GB is enough, not 100GB.** Real breakdown for a ~1hr 1080p test
+  video: source video ~0.5-2.5GB, whisper large-v3 int8 ~3GB, **Qwen2.5-7B-Instruct
+  ~15GB** (the *downloaded* checkpoint is full fp16 precision — 4-bit quantization
+  happens in VRAM at load time, it does not shrink the on-disk download), pip packages
+  ~3-5GB, weights/outputs <1GB. ~25GB real usage; 40-50GB gives comfortable margin.
+  Only go bigger if testing a much longer video or planning multiple videos per
+  instance.
 - **On-demand, not interruptible/spot** — a preempted mid-render job wastes the whole
   run.
 - Filter by GPU **and** vCPU/RAM together — host specs vary between listings with the
@@ -72,6 +78,30 @@ curl -L "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8n
 Light-ASD's weights don't need a separate download — they're vendored and committed in
 git, already present after `git clone`.
 
+**Then apply two fixes confirmed necessary on a real run** (do these now, proactively
+— both were hit during actual testing, not hypothetical):
+
+```bash
+# 1. faster-whisper/CTranslate2 needs cuBLAS/cuDNN on the loader path — PyTorch bundles
+#    its own copy privately, not visible to other libraries. Without this: "Library
+#    libcublas.so.12 is not found or cannot be loaded".
+pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+export LD_LIBRARY_PATH=`python3 -c 'import os; import nvidia.cublas.lib, nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__) + ":" + os.path.dirname(nvidia.cudnn.lib.__file__))'`
+
+# 2. huggingface_hub's Rust-based hf-xet fast-download accelerator is unreliable —
+#    crashed with "Internal Writer Error: Background writer channel closed" downloading
+#    Qwen2.5-7B. Force the plain Python downloader instead.
+export HF_HUB_DISABLE_XET=1
+
+# Optional but recommended: avoids the "unauthenticated requests" HF Hub rate-limit
+# warning. Read-only token from huggingface.co/settings/tokens.
+export HF_TOKEN=<your-read-only-token>
+```
+
+**Both `export` lines only last for the current shell session** — if your SSH
+connection drops and you reconnect, run them again before resuming with `--job-id`
+(or add them to `~/.bashrc` if you expect multiple sessions).
+
 ## 3. Run the pipeline
 
 ```bash
@@ -90,8 +120,7 @@ final clips: data/reframed/
 
 Whisper-large-v3 and Qwen2.5-7B-Instruct auto-download from Hugging Face on first use
 (a few GB total, one-time per instance) — the very first run will be slower than
-subsequent ones for this reason alone, separate from actual processing time. If a
-download fails with a `MemoryError`/Rust panic, see "Known gotchas" below.
+subsequent ones for this reason alone, separate from actual processing time.
 
 ### If it fails partway through
 
@@ -142,18 +171,22 @@ you need.
 - Every log's `VRAM after ...` lines — compare against `docs/hardware-spec.md`'s
   ~7–8GB peak estimate, note if it's meaningfully different so the doc can be corrected.
 
-## Known gotchas (from local dev this session — may or may not reproduce on vast.ai)
+## Known gotchas
 
-- `huggingface_hub`'s `hf-xet` fast-download accelerator crashed with a low-level
-  memory error on the local Windows dev machine. If model downloads fail with a
-  `MemoryError`/Rust panic, retry with `HF_HUB_DISABLE_XET=1` set in the environment.
-- If a `pip install` or download seems to hang or die immediately for no clear reason,
-  retry once — this was a local Windows-sandbox quirk in earlier testing, unlikely on
-  a real Linux instance, but worth ruling out quickly rather than assuming something
-  is fundamentally broken.
+Confirmed on a real vast.ai run (already folded into step 2 above — listed here for
+reference/in case they resurface):
+
+- `libcublas.so.12 is not found or cannot be loaded` at the whisper transcription
+  step — fixed by installing `nvidia-cublas-cu12`/`nvidia-cudnn-cu12` and setting
+  `LD_LIBRARY_PATH` to their install location (step 2).
+- `Internal Writer Error: Background writer channel closed` downloading Qwen2.5-7B —
+  `hf-xet`'s Rust downloader crashing. Fixed by `HF_HUB_DISABLE_XET=1` (step 2). If it
+  recurs even with that set, `pip uninstall -y hf-xet` to remove it entirely.
+
+Not yet confirmed either way on vast.ai (from local Windows dev only):
+
 - `bitsandbytes` (needed for 4-bit Qwen2.5-7B) has historically had rockier Windows
-  support but should install cleanly on vast.ai's Linux environment — not expected to
-  be an issue here, noted just in case.
+  support but should install cleanly on vast.ai's Linux environment.
 
 ## About the Dockerfile
 
