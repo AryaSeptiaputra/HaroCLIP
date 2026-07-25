@@ -1,11 +1,14 @@
 import json
+import os
 import re
 
 from src.highlights.exceptions import HighlightError
 from src.highlights.prompt import build_messages
 from src.transcription.schemas import TranscriptSegment
 
-LLM_MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+LLM_MODEL_NAME = os.getenv("HIGHLIGHT_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+LLM_USE_4BIT = os.getenv("HIGHLIGHT_LLM_4BIT", "1") != "0"
+LLM_DEVICE_MAP = os.getenv("HIGHLIGHT_LLM_DEVICE_MAP", "cuda")
 MAX_NEW_TOKENS = 2048
 MAX_CANDIDATES = 10
 MIN_CLIP_SECONDS = 5
@@ -16,13 +19,24 @@ JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 def generate_candidates(segments: list[TranscriptSegment]) -> str:
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    quant_config = BitsAndBytesConfig(load_in_4bit=True)
     tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
-    model = AutoModelForCausalLM.from_pretrained(
-        LLM_MODEL_NAME, quantization_config=quant_config, device_map="cuda"
-    )
+    if LLM_USE_4BIT:
+        from transformers import BitsAndBytesConfig
+
+        model = AutoModelForCausalLM.from_pretrained(
+            LLM_MODEL_NAME,
+            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
+            device_map=LLM_DEVICE_MAP,
+        )
+    else:
+        # fp16 on CPU can hit "not implemented for Half" on some ops; fp32 on CPU,
+        # fp16 on CUDA (matches production).
+        dtype = torch.float16 if LLM_DEVICE_MAP == "cuda" else torch.float32
+        model = AutoModelForCausalLM.from_pretrained(
+            LLM_MODEL_NAME, torch_dtype=dtype, device_map=LLM_DEVICE_MAP
+        )
     try:
         messages = build_messages(segments)
         prompt = tokenizer.apply_chat_template(
@@ -36,7 +50,8 @@ def generate_candidates(segments: list[TranscriptSegment]) -> str:
         return tokenizer.decode(new_tokens, skip_special_tokens=True)
     finally:
         del model
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def parse_candidates(raw_text: str, video_duration: float) -> list[dict]:
