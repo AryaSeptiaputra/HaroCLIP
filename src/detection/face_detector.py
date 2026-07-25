@@ -1,8 +1,10 @@
+import logging
 import os
 
 import numpy as np
 
 from src.detection.schemas import FaceBox
+from src.utils.logging import log_vram
 
 YOLOV8_FACE_WEIGHTS_PATH = os.getenv(
     "YOLOV8_FACE_WEIGHTS_PATH", "data/models/yolov8n-face-lindevs.pt"
@@ -11,10 +13,15 @@ CONFIDENCE_THRESHOLD = 0.5
 
 
 class FaceDetector:
-    def __init__(self, weights_path: str | None = None):
+    def __init__(self, weights_path: str | None = None, logger: logging.Logger | None = None):
         from ultralytics import YOLO
 
-        self._model = YOLO(weights_path or YOLOV8_FACE_WEIGHTS_PATH)
+        path = weights_path or YOLOV8_FACE_WEIGHTS_PATH
+        if logger:
+            logger.info("loading YOLOv8-face weights=%s", path)
+        self._model = YOLO(path)
+        if logger:
+            log_vram(logger, "YOLOv8-face load")
 
     def detect(self, frame: np.ndarray, frame_index: int) -> list[FaceBox]:
         results = self._model.predict(frame, verbose=False)

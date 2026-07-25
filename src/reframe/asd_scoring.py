@@ -1,3 +1,4 @@
+import logging
 import math
 import subprocess
 import tempfile
@@ -8,6 +9,7 @@ import numpy as np
 
 from src.reframe.exceptions import ReframeError
 from src.tracking.schemas import TrackedFace
+from src.utils.logging import log_vram
 
 WEIGHTS_PATH = (
     Path(__file__).resolve().parent.parent
@@ -54,15 +56,20 @@ def _median_filter(values: list[float], kernel_size: int) -> list[float]:
 
 
 class LightASDScorer:
-    def __init__(self, weights_path: str | None = None):
+    def __init__(self, weights_path: str | None = None, logger: logging.Logger | None = None):
         import torch
 
         from src.detection.light_asd.asd import ASD
 
         self._torch = torch
+        path = weights_path or WEIGHTS_PATH
+        if logger:
+            logger.info("loading Light-ASD weights=%s", path)
         self._model = ASD()
-        self._model.loadParameters(str(weights_path or WEIGHTS_PATH))
+        self._model.loadParameters(str(path))
         self._model.eval()
+        if logger:
+            log_vram(logger, "Light-ASD load")
 
     def close(self) -> None:
         del self._model
