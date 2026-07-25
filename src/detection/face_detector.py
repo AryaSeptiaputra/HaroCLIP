@@ -41,7 +41,8 @@ class FaceDetector:
         import torch
 
         del self._model
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def __enter__(self) -> "FaceDetector":
         return self

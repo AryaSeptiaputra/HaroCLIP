@@ -179,8 +179,8 @@ class LightASDScorer:
                     v_chunk = visual_feature[i * duration * MODEL_FPS:(i + 1) * duration * MODEL_FPS, :, :]
                     if len(a_chunk) == 0 or len(v_chunk) == 0:
                         continue
-                    input_a = torch.FloatTensor(a_chunk).unsqueeze(0).cuda()
-                    input_v = torch.FloatTensor(v_chunk).unsqueeze(0).cuda()
+                    input_a = torch.FloatTensor(a_chunk).unsqueeze(0).to(self._model.device)
+                    input_v = torch.FloatTensor(v_chunk).unsqueeze(0).to(self._model.device)
                     embed_a = self._model.model.forward_audio_frontend(input_a)
                     embed_v = self._model.model.forward_visual_frontend(input_v)
                     out = self._model.model.forward_audio_visual_backend(embed_a, embed_v)

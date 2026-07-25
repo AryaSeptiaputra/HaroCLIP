@@ -123,38 +123,90 @@ before this change until a real GPU instance actually has `torch`/
 regressing the already-verified heuristic path. `service.py`'s single call site now
 calls this function instead of the raw heuristic directly.
 
-**Verification caveat (highlights-module, still current):** local dev has no CUDA GPU,
-so faster-whisper transcription and the Qwen2.5-7B highlight-detection LLM were only
-verified structurally (clean import, prompt rendering, `parse_candidates` against fake
-responses, mocked service flow) — actual transcription accuracy and highlight quality
-are still unverified pending a real vast.ai run.
+**Verification status (updated 2026-07-25 — real local ML verification, not just
+mocked):** the project venv (`C:\Project\HaroCLIP\venv`) now has real (small-model)
+versions of the full heavy ML stack installed ad hoc — `torch` (CPU-only build, see
+tooling note below), `faster-whisper`, `transformers`, `accelerate`, `ultralytics`,
+`supervision`, `python_speech_features`. **Not reflected in `requirements.txt`**, which
+still stays commented per the existing convention (it documents the production/vast.ai
+install list, e.g. the CUDA torch build, not this dev venv's ad hoc local state).
 
-**Verification caveat (reframe-module):** this module has a much better local story —
-`speaker_selection.select_primary_track` and `crop_path.build_crop_path` are pure
-functions, fully unit-tested locally (interpolation, smoothing, clamping, empty-input
-fallback all verified with hand-built fake data). `renderer.render_reframed_clip` was
-run **for real** (not mocked) against a synthetic test video — confirmed exact
-1080×1920 output, correct duration, audio remuxed correctly. The full
-`service.run_reframe` status flow / idempotency / `--force` behavior was verified with
-`FaceDetector`/`FaceTracker` stubbed out. For the Light-ASD addition specifically:
-`asd_scoring._median_filter` is pure math, unit-tested; `select_primary_track_with_asd`'s
-fallback-to-heuristic path was exercised **for real** (torch genuinely absent locally,
-real `ModuleNotFoundError` caught), and the full `service.run_reframe` flow was re-run
-end-to-end with the new call site wired in as a regression check. `FaceDetector`/
-`FaceTracker`/real Light-ASD scoring itself remain unverified for real — need actual
-YOLOv8-face weights + the vendored Light-ASD weights + `torch`/`python_speech_features`
-installed + a real GPU.
+Every stage now has **real, non-mocked local verification** using small model
+substitutes for the production-size models (all downloaded/cached in the local HF
+cache, RTX 3050 4GB present but unused since torch is the CPU build — see tooling note):
+- **Transcription**: `transcribe()` ran for real against the synthetic test video's
+  audio with `WHISPER_MODEL_SIZE=tiny`, `WHISPER_DEVICE=cpu` — confirmed model load +
+  inference + correctly-typed `TranscriptSegment` results (content is garbage, as
+  expected — the test audio is a sine tone, not speech).
+- **Highlight LLM**: `generate_candidates()` ran for real against a fake transcript
+  with `HIGHLIGHT_LLM_MODEL=Qwen/Qwen2.5-0.5B-Instruct`, `HIGHLIGHT_LLM_4BIT=0`,
+  `HIGHLIGHT_LLM_DEVICE_MAP=cpu` — produced syntactically valid JSON (confirms the
+  prompt→generation→parsing wiring is correct) but with all-zero timestamps, which
+  `parse_candidates()` correctly rejected. This is the small model's capability limit
+  (0.5B isn't strong enough to reason about numeric timestamps tied to text), not a
+  code bug — the validator did exactly its job. `run_highlight_detection()` run
+  end-to-end for real reaches `FAILED`/`no valid highlight candidates survived
+  validation` for this same reason, confirming the full chain (transcribe → generate →
+  parse) executes correctly up through this small model's actual limitation.
+- **Detection**: `FaceDetector.detect()` ran for real (`yolov8n-face-lindevs.pt`,
+  downloaded to `data/models/`) against a synthetic test frame — 0 boxes (no real face
+  present), confirms model load + inference + return-type correctness.
+- **Tracking**: `FaceTracker.update()` ran for real against empty detections — confirms
+  the `sv.Detections`/`ByteTrack` wiring doesn't crash on the zero-detections path.
+  (`supervision.ByteTrack` shows a deprecation warning — removed in v0.30, currently on
+  0.29.1 — noted as a future maintenance item, not urgent.)
+- **Light-ASD**: `LightASDScorer()` construction ran for real — confirms
+  `loadParameters` actually loads the vendored ~4MB checkpoint (1,021,120 params) into
+  the real model. `score_track()` itself still can't be meaningfully exercised without
+  a real face+speech clip (none exists locally) — the one remaining verification gap.
+- **Full pipeline regression**: `service.run_reframe()` ran **fully to `READY`** with
+  real `FaceDetector`+`FaceTracker` (no mocks) against the synthetic test clip,
+  producing a real output file — the first time this project's dynamic-crop path has
+  run end-to-end with real detection/tracking calls, anywhere.
 
-**Tooling note (discovered this session, cost real debugging time):** this machine has
-a stray global Python 3.10 install
-(`C:\Users\Arya\AppData\Local\Programs\Python\Python310\python.exe`) with unrelated
-leftover ML packages (including a partially-broken `torch` — importable but
-`torch.nn.functional` fails) that Git Bash's `python`/`python3` on `PATH` resolve to by
-default. The actual project venv is `C:\Project\HaroCLIP\venv` (Python 3.13, matches
-this doc's dependency list exactly — confirmed clean, no torch at all). **Always
-invoke `C:/Project/HaroCLIP/venv/Scripts/python.exe` explicitly for any local
-verification**, not bare `python`/`python3` — otherwise results may be silently
-contaminated by whatever happens to be in the global install.
+**CPU-vs-CUDA device flexibility added this session**, specifically to make this local
+verification possible without matching CUDA driver versions: `light_asd/asd.py`
+(`torch.device("cuda" if torch.cuda.is_available() else "cpu")` instead of upstream's
+hardcoded `.cuda()`), `asd_scoring.py`'s ensemble scoring (`.to(self._model.device)`
+instead of `.cuda()`), and every `torch.cuda.empty_cache()` cleanup call across
+`transcriber.py`/`llm.py`/`face_detector.py` now guarded with
+`if torch.cuda.is_available()`. New env vars for this same purpose, all defaulting to
+production behavior when unset: `WHISPER_MODEL_SIZE` (default `large-v3`),
+`WHISPER_DEVICE` (default `cuda`), `HIGHLIGHT_LLM_MODEL` (default
+`Qwen/Qwen2.5-7B-Instruct`), `HIGHLIGHT_LLM_4BIT` (default on), `HIGHLIGHT_LLM_DEVICE_MAP`
+(default `cuda`). None of this changes behavior on the real vast.ai deployment target
+(CUDA always available there) — it only makes local CPU verification possible.
+
+**Still unverified even after this pass:** actual production-scale model quality —
+whisper large-v3 transcription accuracy, Qwen2.5-7B highlight judgment, YOLOv8-face/
+ByteTrack/Light-ASD *accuracy* against real footage (vs. just "doesn't crash" against a
+synthetic video with zero real faces) — needs either a real face+speech test clip
+locally or a real vast.ai GPU run.
+
+**Tooling notes (discovered this session, cost real debugging time — read before
+running anything ML-related locally):**
+- This machine has a stray global Python 3.10 install
+  (`C:\Users\Arya\AppData\Local\Programs\Python\Python310\python.exe`) with unrelated
+  leftover ML packages that Git Bash's `python`/`python3` on `PATH` resolve to by
+  default. **Always invoke `C:/Project/HaroCLIP/venv/Scripts/python.exe` explicitly**,
+  not bare `python`/`python3`.
+- **Large file downloads (torch wheels, etc.) reliably fail when run via a backgrounded
+  shell command** (both `pip install` and direct `curl`) — they get killed almost
+  immediately after the transfer starts, regardless of file size (tested: 2.5GB CUDA
+  wheel, 206MB and 122MB CPU wheels all failed the same way). **A plain foreground shell
+  call with a generous timeout works fine** (confirmed steady ~1MB/s throughput, no
+  issue) — this is specific to how backgrounded downloads are handled, not a real
+  network or sandbox block. If a large download is needed and might exceed the ~10min
+  foreground cap, prefer a smaller model variant over fighting the backgrounding issue.
+- Installing full CUDA torch (~2.5GB) wasn't achievable within a single foreground
+  call's time budget at observed throughput (~42min needed vs. ~10min cap) — used the
+  CPU-only build (~200MB, ~4min) instead. GPU went effectively unused for this session's
+  verification as a result (confirmed via `nvidia-smi`: ~1% utilization throughout).
+- `huggingface_hub`'s Rust-based `hf-xet` fast-download accelerator threw a low-level
+  `MemoryError`/Rust panic when downloading a model — worked around with
+  `HF_HUB_DISABLE_XET=1` (forces the plain Python downloader) or by pre-downloading via
+  `hf download <model>` in the user's own terminal first, then running with
+  `HF_HUB_OFFLINE=1` so the script never touches the network.
 
 ## Architecture
 
@@ -162,13 +214,16 @@ Planned across 5 phases (details TBD as implementation proceeds).
 
 ## Next steps (not yet started — waiting on direction)
 
-1. Run the full pipeline end-to-end on a real vast.ai GPU instance with the manually-
-   downloaded YOLOv8-face weights in place and `torch`/`python_speech_features`
-   installed: transcription accuracy, LLM highlight quality, YOLOv8-face/ByteTrack
-   behavior on real footage, real Light-ASD scoring correctness, actual crop quality,
-   and actual VRAM usage vs `docs/hardware-spec.md` estimates — nothing beyond the
-   mocked/stubbed local checks has run for real yet. This is now the single remaining
-   validation step covering all four pipeline stages.
+1. Get a real short face+speech test clip (e.g. a webcam recording) to close the one
+   remaining local-verification gap: actual YOLOv8-face/ByteTrack/Light-ASD behavior
+   against real content, still only checked for "doesn't crash" against a synthetic
+   video with zero real faces so far.
+2. Run the full pipeline end-to-end on a real vast.ai GPU instance with production-size
+   models (whisper large-v3, Qwen2.5-7B) and the manually-downloaded YOLOv8-face
+   weights in place: transcription accuracy, LLM highlight quality at full model size,
+   actual VRAM usage vs `docs/hardware-spec.md` estimates. Wiring for all four stages is
+   now verified locally (small-model substitutes, real inference, not mocks) — this is
+   about production-scale model quality and real GPU resource usage specifically.
 
 ## Working conventions
 
