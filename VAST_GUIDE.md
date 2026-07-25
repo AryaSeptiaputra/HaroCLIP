@@ -7,10 +7,24 @@ detection → dynamic-crop reframe) on a rented vast.ai GPU instance. Written fo
 Branch to test: `vast-ai-e2e-prep` (not yet merged to `main` — merge only after this
 test succeeds, so any fixes needed land in the same branch).
 
+**Setup approach: install directly on the instance, no Docker.** A `Dockerfile` exists
+in the repo for later reproducibility, but for this first real run it's simpler and
+faster to pick a vast.ai template that already has PyTorch+CUDA installed and add our
+remaining dependencies on top — avoids re-downloading a multi-GB CUDA base image and
+torch wheel inside the instance, and avoids depending on vast.ai's nested-Docker
+support (not guaranteed on every template).
+
 ## 1. Rent the instance
 
 See `docs/hardware-spec.md` for the full breakdown. Short version:
 
+- **Template: pick a "PyTorch" template with CUDA 12.x already installed.** Search
+  vast.ai's template gallery for "PyTorch" — most official/popular ones qualify. This
+  means `torch` is already present (skip installing it — see step 2) and the CUDA
+  driver is already matched, which is the fiddliest part to get right manually.
+- **Python version: 3.10+ is fine, doesn't need to be exactly 3.13.** The codebase's
+  local dev venv uses 3.13, but nothing in it is 3.13-exclusive (just modern `X | None`
+  type hints, which work from 3.10 on) — use whatever `python3` the template ships.
 - **GPU**: 12–16GB is likely enough (e.g. RTX 3060 12GB, RTX 4070) — real peak VRAM
   usage is ~7–8GB given every stage loads/frees its model sequentially, not
   concurrently. A 24GB card (RTX 4090/3090) is a safety margin, not a requirement, and
@@ -22,41 +36,46 @@ See `docs/hardware-spec.md` for the full breakdown. Short version:
 - Filter by GPU **and** vCPU/RAM together — host specs vary between listings with the
   same GPU model.
 
-## 2. SSH in, clone, build
+## 2. SSH in, verify the base template, install remaining deps
+
+**First, before anything else**, confirm the template actually has a working
+CUDA-enabled torch — fail fast here rather than after a long setup:
+
+```bash
+nvidia-smi
+python3 -c "import torch; print(torch.__version__, 'cuda:', torch.cuda.is_available())"
+```
+
+If `torch.cuda.is_available()` isn't `True`, stop and pick a different template —
+nothing downstream will work right.
+
+Then clone and install:
 
 ```bash
 git clone https://github.com/AryaSeptiaputra/HaroCLIP.git
 cd HaroCLIP
 git checkout vast-ai-e2e-prep
 
-docker build -t haroclip .
+apt-get update && apt-get install -y ffmpeg   # most PyTorch templates don't include this
+
+pip install -r requirements.txt
+# torch is already installed by the template — do NOT reinstall it, that's the
+# multi-GB download this approach specifically avoids. Everything else:
+pip install faster-whisper transformers accelerate bitsandbytes \
+    ultralytics supervision python_speech_features
+
+mkdir -p data/models
+curl -L "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8n-face-lindevs.pt" \
+    -o data/models/yolov8n-face-lindevs.pt
 ```
 
-The build installs CUDA 12.4 + Python 3.13, `ffmpeg`, every dependency (including the
-heavy ML stack — torch/faster-whisper/transformers/accelerate/bitsandbytes/
-ultralytics/supervision/python_speech_features), and downloads the YOLOv8-face
-weights. **This step alone can take 20–40+ minutes** depending on the instance's
-network speed — the CUDA base image and torch wheel are several GB each. Budget for
-this before your first real job starts; it's a one-time cost per instance (not
-per-video), so if you expect to test more than one video, keep the instance around
-between runs rather than rebuilding.
+Light-ASD's weights don't need a separate download — they're vendored and committed in
+git, already present after `git clone`.
 
-## 3. Run the container
+## 3. Run the pipeline
 
 ```bash
-docker run --gpus all -v $(pwd)/data:/workspace/data -it haroclip bash
-```
-
-`-v $(pwd)/data:/workspace/data` is important — it makes `data/` persist on the host
-filesystem instead of only inside the container, so results survive even if the
-container is removed. **Always use this flag.**
-
-## 4. Run the pipeline
-
-Inside the container:
-
-```bash
-python3.13 -m src.pipeline.run --url "https://youtu.be/q44ozTxnU8A?si=wR5jQi7c9vxFSWQG"
+python3 -m src.pipeline.run --url "https://youtu.be/q44ozTxnU8A?si=wR5jQi7c9vxFSWQG"
 ```
 
 This chains all four stages (ingestion → processing → highlights → reframe)
@@ -71,7 +90,8 @@ final clips: data/reframed/
 
 Whisper-large-v3 and Qwen2.5-7B-Instruct auto-download from Hugging Face on first use
 (a few GB total, one-time per instance) — the very first run will be slower than
-subsequent ones for this reason alone, separate from actual processing time.
+subsequent ones for this reason alone, separate from actual processing time. If a
+download fails with a `MemoryError`/Rust panic, see "Known gotchas" below.
 
 ### If it fails partway through
 
@@ -80,16 +100,16 @@ The printed error tells you which stage failed and gives you the ingestion job i
 every already-successful stage. Instead:
 
 ```bash
-python3.13 -m src.pipeline.run --job-id <uuid>
+python3 -m src.pipeline.run --job-id <uuid>
 ```
 
 Every stage is idempotent (short-circuits if already `ready` unless you also pass
 `--force`), so this safely resumes from wherever it actually stopped.
 
-## 5. Collect results before destroying the instance
+## 4. Collect results before destroying the instance
 
-Everything you need is under `data/` on the **host** (thanks to the `-v` mount in step
-3), so you don't need to be inside the container for this:
+Everything lands under `HaroCLIP/data/` (set via `DATA_DIR`, defaults to `./data`
+relative to wherever you ran the command):
 
 - `data/logs/<ingestion_job_id>/` — four files (`ingestion.log`, `processing.log`,
   `highlights.log`, `reframe.log`). **These are what to bring back for quality
@@ -102,40 +122,52 @@ Everything you need is under `data/` on the **host** (thanks to the `-v` mount i
 - `data/haroclip.db` — SQLite DB with full job status/metadata if useful.
 
 ```bash
-# from your local machine, not inside the container:
-scp -r -P <port> root@<instance-ip>:/workspace/HaroCLIP/data ./haroclip-results
+# from your local machine, not the instance:
+scp -r -P <port> root@<instance-ip>:~/HaroCLIP/data ./haroclip-results
 ```
 
 (Adjust the path/port to whatever vast.ai's SSH connection details show for your
 instance.) Then **destroy the instance** — don't leave it running once you have what
 you need.
 
-## 6. What to check in the logs afterward
+## 5. What to check in the logs afterward
 
 - `reframe.log`: search for `method=` — `method=light-asd` means real ASD scoring ran;
   `method=heuristic` means it fell back (check the `reason=` on that line — usually
-  either `ImportError` meaning deps weren't actually installed in the image, or a
-  scoring exception).
+  either `ImportError` meaning deps weren't actually installed, or a scoring
+  exception).
 - `highlights.log`: compare the full transcript against which candidates were kept —
   did the LLM pick genuinely interesting moments, or did most candidates get rejected
   by validation (check `parse_candidates` rejection reasons)?
 - Every log's `VRAM after ...` lines — compare against `docs/hardware-spec.md`'s
   ~7–8GB peak estimate, note if it's meaningfully different so the doc can be corrected.
 
-## Known gotchas (from local dev this session — may or may not reproduce on Linux/vast.ai)
+## Known gotchas (from local dev this session — may or may not reproduce on vast.ai)
 
 - `huggingface_hub`'s `hf-xet` fast-download accelerator crashed with a low-level
   memory error on the local Windows dev machine. If model downloads fail with a
   `MemoryError`/Rust panic, retry with `HF_HUB_DISABLE_XET=1` set in the environment.
-- If a `pip install` or download inside the container seems to hang or die
-  immediately for no clear reason, retry once — this was a local Windows-sandbox
-  quirk, unlikely on a real Linux instance, but worth ruling out quickly rather than
-  assuming something is fundamentally broken.
+- If a `pip install` or download seems to hang or die immediately for no clear reason,
+  retry once — this was a local Windows-sandbox quirk in earlier testing, unlikely on
+  a real Linux instance, but worth ruling out quickly rather than assuming something
+  is fundamentally broken.
+- `bitsandbytes` (needed for 4-bit Qwen2.5-7B) has historically had rockier Windows
+  support but should install cleanly on vast.ai's Linux environment — not expected to
+  be an issue here, noted just in case.
+
+## About the Dockerfile
+
+`Dockerfile` in the repo root builds a fully self-contained image (CUDA base + every
+dependency + baked-in YOLOv8-face weights) and was validated structurally (build
+started successfully, layer-by-layer) but not completed end-to-end locally due to
+local bandwidth. It's kept for later — e.g. pushing a prebuilt image to a registry once
+one exists, for faster/more reproducible instance boots — but isn't part of this first
+test's critical path.
 
 ## Bring back to Claude
 
 Once you have `data/logs/<ingestion_job_id>/` locally, hand the four log files back for
 analysis — that's the whole point of the logging added this session. Also mention:
-total wall-clock time, which GPU/VRAM you actually rented, and whether the build step
-or the run step took unexpectedly long, so cost/time estimates in
+total wall-clock time, which GPU/VRAM you actually rented, which template you used, and
+whether setup or the run itself took unexpectedly long, so cost/time estimates in
 `docs/hardware-spec.md` can be corrected with real numbers instead of guesses.

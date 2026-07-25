@@ -95,32 +95,23 @@ listings with the same GPU model.
 > vast.ai pricing is a live marketplace and fluctuates with supply/demand — these are
 > ballpark estimates; check actual listing prices before renting.
 
-## Running via Docker
+## Running on vast.ai
 
-`Dockerfile` (repo root) builds the full production image: CUDA 12.4 + Python 3.13,
-`ffmpeg`, every dependency in `requirements.txt` plus the heavy ML stack (torch/
-faster-whisper/transformers/accelerate/bitsandbytes/ultralytics/supervision/
-python_speech_features), and bakes in the YOLOv8-face weights (Light-ASD's weights are
-already vendored in git, arrive automatically). No fixed `ENTRYPOINT` — this is a
-rented-instance workflow (SSH in, run one job, collect results, destroy), not a
-persistent service.
+**See `VAST_GUIDE.md` (repo root) for the actual step-by-step walkthrough** — rent →
+template choice → setup → run → collect results → troubleshooting. Summary of the
+approach decided there: for the first real test, install directly onto a vast.ai
+instance rented from a **PyTorch-preinstalled template** (CUDA + torch already
+present, so no multi-GB CUDA base image or torch wheel to download inside the
+instance), rather than a from-scratch Docker build — simpler, faster to get running,
+and doesn't depend on vast.ai's nested-Docker support being available on a given
+template.
 
-On the vast.ai instance:
-
-```bash
-git clone https://github.com/AryaSeptiaputra/HaroCLIP.git && cd HaroCLIP
-docker build -t haroclip .
-docker run --gpus all -v $(pwd)/data:/workspace/data -it haroclip bash
-
-# inside the container:
-python3.13 -m src.pipeline.run --url "<source_url>"
-# or, to resume a partially-completed run without re-downloading:
-python3.13 -m src.pipeline.run --job-id <ingestion_job_id>
-```
-
-Mounting `-v $(pwd)/data:/workspace/data` makes `data/logs/`, `data/clips/`,
-`data/reframed/`, and the SQLite DB persist on the host filesystem, not just inside the
-container — download this directory (`scp`/`rsync`) before destroying the instance.
+`Dockerfile` (repo root) still exists and builds the full self-contained production
+image (CUDA 12.4 + Python 3.13 + every dependency + baked-in YOLOv8-face weights) — it
+was structurally validated (build starts and proceeds correctly, layer by layer) but
+not run to completion locally due to bandwidth. Kept for later, e.g. once a prebuilt
+image is worth pushing to a registry for faster/more reproducible instance boots — not
+on the critical path for the first real test.
 
 ## Next validation step
 
