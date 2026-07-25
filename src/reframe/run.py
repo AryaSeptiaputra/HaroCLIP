@@ -1,6 +1,10 @@
 import argparse
 import sys
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from src.highlights.models import HighlightClip, HighlightJob
 from src.reframe.enums import ReframeStatus
 from src.reframe.service import run_reframe

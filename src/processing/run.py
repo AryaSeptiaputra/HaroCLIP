@@ -1,6 +1,10 @@
 import argparse
 import sys
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from src.processing.enums import ProcessingStatus
 from src.processing.service import run_processing
 from src.utils.db import SessionLocal, init_db

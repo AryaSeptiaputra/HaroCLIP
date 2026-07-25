@@ -1,6 +1,10 @@
 import argparse
 import sys
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from src.highlights.enums import HighlightStatus
 from src.highlights.models import HighlightClip
 from src.highlights.service import run_highlight_detection
