@@ -6,12 +6,18 @@ import numpy as np
 from src.detection.schemas import FaceBox
 from src.utils.logging import log_vram
 
-# medium (not nano): freed VRAM budget from moving highlight-detection to the Claude
-# API went toward better face-detection accuracy instead. See docs/hardware-spec.md.
+# xlarge (not medium): the 2026-07-26 local-model quality pass confirmed
+# lindevs/yolov8-face publishes large/xlarge variants beyond medium, and a detection
+# model's VRAM cost is small in absolute terms even at xlarge (a few GB) — trivial
+# against the 24GB budget freed up by moving highlight-detection to the Claude API.
+# See docs/hardware-spec.md.
 YOLOV8_FACE_WEIGHTS_PATH = os.getenv(
-    "YOLOV8_FACE_WEIGHTS_PATH", "data/models/yolov8m-face-lindevs.pt"
+    "YOLOV8_FACE_WEIGHTS_PATH", "data/models/yolov8x-face-lindevs.pt"
 )
 CONFIDENCE_THRESHOLD = 0.5
+# Up from Ultralytics' default 640 — a standard YOLO accuracy lever that improves
+# small/distant-face recall, at trivial extra compute/VRAM cost for a detection model.
+INFERENCE_IMAGE_SIZE = 1280
 
 
 class FaceDetector:
@@ -26,7 +32,7 @@ class FaceDetector:
             log_vram(logger, "YOLOv8-face load")
 
     def detect(self, frame: np.ndarray, frame_index: int) -> list[FaceBox]:
-        results = self._model.predict(frame, verbose=False)
+        results = self._model.predict(frame, verbose=False, imgsz=INFERENCE_IMAGE_SIZE)
         boxes: list[FaceBox] = []
         for result in results:
             for box in result.boxes:

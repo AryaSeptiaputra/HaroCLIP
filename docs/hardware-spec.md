@@ -5,13 +5,17 @@ This doc records the sizing decision so it doesn't need to be re-derived each se
 
 ## Assumptions
 
-- Transcription: faster-whisper **large-v3, float16** (CTranslate2) — upgraded from
-  `int8` on 2026-07-26, see below
+- Transcription: faster-whisper **large-v3, float16, `vad_filter=True`** (CTranslate2)
+  — `int8`→`float16` on 2026-07-26, `vad_filter` added later the same day (already the
+  largest standard whisper checkpoint, so the remaining quality lever is inference
+  settings, not a bigger model — see `CLAUDE.md`'s "Local-model quality pass")
 - Highlight detection: **Claude API** (`anthropic` SDK) — no local model, no local
   GPU/VRAM use at all. Switched from local Qwen2.5-7B-Instruct 4-bit on 2026-07-26,
   see `CLAUDE.md`'s "Current status" for the full rationale (context-window bug found
   on the first real vast.ai run)
-- Face detection: YOLOv8-face **medium** variant — upgraded from `nano` on 2026-07-26
+- Face detection: YOLOv8-face **xlarge** variant at `imgsz=1280` — `nano`→`medium` on
+  2026-07-26, then `medium`→`xlarge` later the same day once the medium-vs-larger
+  headroom was re-examined (a detection model's VRAM cost is small even at xlarge)
 - Captioning: ffmpeg `subtitles` filter burn-in (added 2026-07-26) — CPU-bound
   re-encode, no GPU/VRAM use, see `CLAUDE.md`'s "Captioning" bullet
 - Source video worst case: 1–3 hour VOD/podcast, 1080p
@@ -22,31 +26,39 @@ This doc records the sizing decision so it doesn't need to be re-derived each se
 
 | Stage | Component | VRAM (est.) | Notes |
 |---|---|---|---|
-| Transcription | faster-whisper large-v3, **float16** | ~9–10 GB | Upgraded from `int8` (~4.5–5GB) on 2026-07-26 — roughly double, spending the VRAM the local LLM no longer needs on transcription precision instead; ~10–20x realtime on RTX 3090/4090 |
+| Transcription | faster-whisper large-v3, **float16**, `vad_filter=True` | ~9–10 GB | Upgraded from `int8` (~4.5–5GB) on 2026-07-26 — roughly double, spending the VRAM the local LLM no longer needs on transcription precision instead; `vad_filter` adds no VRAM (it's a pre-decoding silence-stripping pass); ~10–20x realtime on RTX 3090/4090 |
 | Highlight detection | **Claude API** (Sonnet-tier) | **0 GB (no local GPU use)** | Runs over the network, not on the rented GPU at all — see `CLAUDE.md` for why this replaced the local Qwen2.5-7B-Instruct 4-bit (~5–6GB) stage on 2026-07-26 |
-| Face detection | YOLOv8-face, **medium** | ~3–4 GB | Upgraded from `nano` (~1.5–2GB) on 2026-07-26 for better detection accuracy. Cost scales with sampled frame count, not full framerate |
+| Face detection | YOLOv8-face, **xlarge**, `imgsz=1280` | ~5–8 GB | Upgraded `nano`→`medium`→**xlarge** (68.1M params, largest `lindevs/yolov8-face` publishes) on 2026-07-26, plus `imgsz` 640→1280 for better small-face recall. Estimate is a rough scale-up from medium's ~3–4GB, **not yet measured** — detection-model VRAM doesn't scale linearly with params the way LLM VRAM does, so treat this range loosely until a real run's logs confirm it. Cost scales with sampled frame count, not full framerate |
 | Active Speaker Detection | Light-ASD | ~1–2 GB | Per face-track, low overhead vs whisper |
 | Tracking | ByteTrack | 0 (CPU-only) | Kalman filter + Hungarian matching |
 | Rendering | ffmpeg (libx264, CPU) | 0 | NVENC not used yet — see note below |
 | Captioning | ffmpeg `subtitles` filter burn-in (libass, CPU) | 0 | Added 2026-07-26 — re-encode pass, CPU-bound like rendering; requires the ffmpeg build to have `libass` compiled in (standard on most distro builds) |
 | Overhead | CUDA context (fresh per model load) | ~1–1.5 GB | Paid once per stage, not cumulative — see below |
 
-**Peak VRAM re-corrected (2026-07-26): ~10–11 GB, not the prior ~7–8 GB estimate.**
-Every stage implemented so far still explicitly frees its model
+**Peak VRAM re-corrected again (2026-07-26): ~10–13 GB estimated, not the prior
+~10–11 GB.** Every stage implemented so far still explicitly frees its model
 (`del model` + `torch.cuda.empty_cache()`, guarded by `torch.cuda.is_available()`)
 **before the next stage loads**, so real peak VRAM at any instant is still
-`max(single biggest stage) + CUDA context overhead` — not a sum. What changed is
-*which* stage is biggest: with highlight detection moved off-GPU entirely (Claude API)
-and whisper upgraded to `float16`, whisper is now the single biggest local stage at
-~9–10GB, plus ~1–1.5GB overhead ≈ **~10–11GB**. Still comfortably inside a 24GB budget
-even before accounting for YOLOv8-face `medium`'s slightly higher ~3–4GB (YOLOv8-face
-never overlaps with whisper — sequential, not concurrent). Still needs confirming
-against **real observed numbers** from a production run (each stage logs
+`max(single biggest stage) + CUDA context overhead` — not a sum. Whisper (~9–10GB) is
+still likely the single biggest local stage even after YOLOv8-face's medium→xlarge
+bump (~5–8GB estimated) — so the peak-VRAM figure probably doesn't move much, but the
+margin between whisper and YOLOv8-face is now narrower than it was at medium, worth
+double-checking once real numbers exist rather than assuming whisper stays on top.
+Either way, comfortably inside a 24GB budget. Still needs confirming against **real
+observed numbers** from a production run (each stage logs
 `torch.cuda.memory_allocated()`/`memory_reserved()` right after its model loads — see
 `src/utils/logging.py`'s `log_vram()` — check `data/logs/<job_id>/` after a real run
-and reconcile against this doc). The first real vast.ai run (2026-07-25) predates this
-float16/medium/Claude-API change, so its logged VRAM numbers reflect the *old*
-int8/nano/Qwen config — not directly comparable, wait for the next run.
+and reconcile against this doc). The first real vast.ai run (2026-07-25) predates all
+of this (float16/vad_filter, medium/xlarge, Claude-API), so its logged VRAM numbers
+reflect the *old* int8/nano/Qwen config — not directly comparable, wait for the next
+run.
+
+**Light-ASD was evaluated for a possible upgrade and deliberately kept unchanged**
+(~1–2GB, same as before) — no bigger official checkpoint exists (it's designed to be
+lightweight), and the natural "bigger" alternative, TalkNet-ASD, isn't established to
+actually be more accurate: Light-ASD's own paper claims ~94% mAP on AVA-ActiveSpeaker
+vs. TalkNet's officially reported ~90-92% mAP on the same benchmark. See `CLAUDE.md`'s
+"Local-model quality pass" note for the full reasoning.
 
 **ffmpeg rendering uses CPU `libx264`, not NVENC**, despite NVENC being lower VRAM and
 faster — a deliberate choice to avoid introducing an unverified behavior change (ffmpeg
@@ -56,19 +68,21 @@ once the pipeline is proven end-to-end for real.
 ## GPU recommendation
 
 **Decided (2026-07-26): RTX 3090/4090 24GB, not downsized.** Even at the re-corrected
-~10–11GB peak (see above), a 12-16GB card would technically fit — but the user
+~10–13GB peak (see above), a 12-16GB card would technically fit — but the user
 explicitly chose to keep the 24GB tier rather than downsize, and redirect the VRAM
 budget the local LLM no longer needs (moved to the Claude API) toward quality
 upgrades on the stages that still run locally instead of toward cost savings:
-whisper `int8`→`float16`, YOLOv8-face `nano`→`medium`. This reverses the
-cost-optimization framing this section carried before the Claude API switch.
+whisper `int8`→`float16`+`vad_filter`, YOLOv8-face `nano`→`medium`→`xlarge`@`imgsz=1280`.
+This reverses the cost-optimization framing this section carried before the Claude
+API switch.
 
 - **Chosen: RTX 4090/3090 24GB** — headroom is spent on transcription/detection
-  precision (float16 whisper, medium YOLOv8-face) rather than sitting idle as safety
-  margin; also leaves room for further quality upgrades later (e.g. denser face-sampling
-  fps, batch-size increases) without another hardware-tier decision.
+  precision (float16+VAD whisper, xlarge YOLOv8-face at higher inference resolution)
+  rather than sitting idle as safety margin; also leaves room for further quality
+  upgrades later (e.g. denser face-sampling fps, batch-size increases) without another
+  hardware-tier decision.
 - **Not chosen: 12–16GB** (e.g. RTX 3060 12GB, RTX 4070 12GB) — would technically fit
-  the current ~10–11GB peak, but was ruled out in favor of spending the freed budget on
+  the current ~10–13GB peak, but was ruled out in favor of spending the freed budget on
   quality rather than cost.
 - **Avoid**: A100/H100 (massive overkill, priced out of budget), A5000/A6000 (no
   meaningful benefit for this workload, usually worse $/hr than 4090).
@@ -81,11 +95,13 @@ cost-optimization framing this section carried before the Claude API switch.
   - Source video: ~3–8GB/hour (H.264) → 3hr video ≈ 10–25GB
   - Model weights: whisper large-v3 (~3GB checkpoint on disk regardless of
     int8/float16 — quantization affects VRAM at inference, not download size) +
-    YOLOv8-face medium (tens of MB) + Light-ASD (<10MB, vendored in git) — whisper
-    auto-downloads to the HuggingFace cache on first use, no manual step. **No local
-    LLM checkpoint to download at all** since highlight detection moved to the Claude
-    API on 2026-07-26 — this removes what was previously the single largest download
-    (Qwen2.5-7B-Instruct, several GB) from the storage/bootstrap-time budget entirely.
+    YOLOv8-face xlarge (still well under 200MB — 68.1M params, bigger than medium but
+    nowhere near whisper/LLM-scale download sizes) + Light-ASD (<10MB, vendored in
+    git) — whisper auto-downloads to the HuggingFace cache on first use, no manual
+    step. **No local LLM checkpoint to download at all** since highlight detection
+    moved to the Claude API on 2026-07-26 — this removes what was previously the
+    single largest download (Qwen2.5-7B-Instruct, several GB) from the
+    storage/bootstrap-time budget entirely.
   - Output clips: tens–hundreds of MB each
 
 Filter vast.ai listings by GPU **and** vCPU/RAM together — host specs vary between
@@ -148,11 +164,13 @@ on the critical path for the first real test.
 (ingestion → processing → highlight detection → reframe) via `src.pipeline.run` on a
 57-min video, but on the *old* config (whisper int8, YOLOv8-face nano, local
 Qwen2.5-7B-Instruct) — its logged VRAM numbers reconcile against the old ~7–8GB
-estimate, not this doc's current ~10–11GB one, and it surfaced the context-window bug
+estimate, not this doc's current ~10–13GB one, and it surfaced the context-window bug
 that motivated the Claude API switch (see `CLAUDE.md`). **A re-run with the current
-code (float16 whisper, medium YOLOv8-face, Claude API) is still needed** — every stage
-still logs timings and `torch.cuda.memory_allocated()`/`memory_reserved()` right after
-its model loads (`data/logs/<ingestion_job_id>/<stage>.log`); after that re-run,
-compare those real numbers against this doc's re-corrected ~10–11GB peak-VRAM claim
-above and revise if off, and check the real per-video Claude API cost against the
-~$0.20–0.31 estimate above.
+code (float16+`vad_filter` whisper, xlarge YOLOv8-face @ `imgsz=1280`, Claude API,
+captioning) is still needed** — every stage still logs timings and
+`torch.cuda.memory_allocated()`/`memory_reserved()` right after its model loads
+(`data/logs/<ingestion_job_id>/<stage>.log`); after that re-run, compare those real
+numbers against this doc's re-corrected ~10–13GB peak-VRAM claim above and revise if
+off, confirm YOLOv8-face's actual VRAM usage at xlarge (the ~5–8GB estimate is the
+least-verified number in this doc — a rough scale-up, not a measurement), and check
+the real per-video Claude API cost against the ~$0.20–0.31 estimate above.

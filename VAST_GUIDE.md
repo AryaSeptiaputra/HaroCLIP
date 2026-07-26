@@ -27,13 +27,13 @@ See `docs/hardware-spec.md` for the full breakdown. Short version:
   local dev venv uses 3.13, but nothing in it is 3.13-exclusive (just modern `X | None`
   type hints, which work from 3.10 on) — use whatever `python3` the template ships.
 - **GPU: RTX 4090/3090 24GB** (decided 2026-07-26, not downsized). Real peak VRAM is
-  ~10–11GB (whisper `float16` is now the single biggest local stage, since highlight
-  detection runs on the Claude API instead of a local GPU model — see
-  `docs/hardware-spec.md`) so a 12-16GB card would technically fit, but the 24GB tier
-  is kept deliberately: the VRAM the local LLM no longer needs was redirected into
-  quality upgrades (whisper `float16`, YOLOv8-face `medium`) rather than downsizing for
-  cost. Don't pick a smaller card to save money here — that would undo the deliberate
-  quality tradeoff already made.
+  an estimated ~10-13GB (whisper `float16` is still likely the single biggest local
+  stage, with YOLOv8-face `xlarge` a distant second — see `docs/hardware-spec.md`) so
+  a 12-16GB card would technically fit, but the 24GB tier is kept deliberately: the
+  VRAM the local LLM no longer needs was redirected into quality upgrades (whisper
+  `float16` + VAD filtering, YOLOv8-face `xlarge` at `imgsz=1280`) rather than
+  downsizing for cost. Don't pick a smaller card to save money here — that would undo
+  the deliberate quality tradeoff already made.
 - **vCPU/RAM**: 8+ cores, 32GB+ RAM (ffmpeg decode/encode benefits from multi-core).
 - **Storage: ~25-30GB is enough, not 100GB.** Real breakdown for a ~1hr 1080p test
   video: source video ~0.5-2.5GB, whisper large-v3 checkpoint ~3GB (same download size
@@ -79,8 +79,8 @@ pip install -r requirements.txt
 pip install faster-whisper ultralytics supervision python_speech_features
 
 mkdir -p data/models
-curl -L "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8m-face-lindevs.pt" \
-    -o data/models/yolov8m-face-lindevs.pt
+curl -L "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8x-face-lindevs.pt" \
+    -o data/models/yolov8x-face-lindevs.pt
 ```
 
 Light-ASD's weights don't need a separate download — they're vendored and committed in

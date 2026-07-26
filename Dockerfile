@@ -36,13 +36,15 @@ RUN pip install --no-cache-dir \
         faster-whisper \
         ultralytics supervision python_speech_features
 
-# --- YOLOv8-face weights, medium variant (the one weight file not already vendored in
+# --- YOLOv8-face weights, xlarge variant (the one weight file not already vendored in
 # git — Light-ASD's weights are committed under src/detection/light_asd/weight/ and
-# arrive via COPY below). Medium, not nano: VRAM freed by moving the highlight LLM to
-# the Claude API went toward better face-detection accuracy instead. ---
+# arrive via COPY below). Xlarge, the largest lindevs/yolov8-face publishes: VRAM
+# freed by moving the highlight LLM to the Claude API went toward better
+# face-detection accuracy instead, and a detection model's VRAM cost is small in
+# absolute terms even at xlarge. See docs/hardware-spec.md. ---
 RUN mkdir -p data/models && curl -L \
-        "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8m-face-lindevs.pt" \
-        -o data/models/yolov8m-face-lindevs.pt
+        "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8x-face-lindevs.pt" \
+        -o data/models/yolov8x-face-lindevs.pt
 
 COPY . .
 

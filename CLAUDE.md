@@ -15,7 +15,7 @@ word-burst captions as the final step.
   from the full transcript in one call, no local model/GPU involved). Was a local LLM
   (Qwen2.5-7B-Instruct) until 2026-07-25 — see "Current status" for why that changed.
 - **Light-ASD** — active speaker detection (vendored from source, no PyPI package)
-- **YOLOv8-face** (ultralytics, **medium** variant) — face detection
+- **YOLOv8-face** (ultralytics, **xlarge** variant, `imgsz=1280`) — face detection
 - **ByteTrack** — object/face tracking
 - **ffmpeg** — rendering/video processing, plus caption burn-in via its `subtitles`
   filter (libass) — no separate subtitle-rendering library
@@ -103,12 +103,14 @@ steps" for merge status):
   modules' per-ingestion-job granularity (the CLI still takes `--job-id
   <ingestion_job_id>` for UX consistency and loops over that job's clips internally).
   **YOLOv8-face weights are a manual prerequisite** (not pip-installable):
-  `YOLOV8_FACE_WEIGHTS_PATH` env var, default `data/models/yolov8m-face-lindevs.pt`
-  (**medium** variant, see the LLM-switch paragraph above for why) — source: community
-  repo `lindevs/yolov8-face` (WIDERFace-trained, MIT-licensed), must be downloaded onto
-  the vast.ai instance manually (or baked into the Docker image — see `Dockerfile`),
-  same category as the `ffmpeg` binary being a documented prerequisite rather than a
-  `requirements.txt` entry.
+  `YOLOV8_FACE_WEIGHTS_PATH` env var, default `data/models/yolov8x-face-lindevs.pt`
+  (**xlarge** variant, largest `lindevs/yolov8-face` publishes — see the "Local-model
+  quality pass" note below for why) — source: community repo `lindevs/yolov8-face`
+  (WIDERFace-trained, MIT-licensed), must be downloaded onto the vast.ai instance
+  manually (or baked into the Docker image — see `Dockerfile`), same category as the
+  `ffmpeg` binary being a documented prerequisite rather than a `requirements.txt`
+  entry. Inference also runs at `imgsz=1280` (up from Ultralytics' default 640) for
+  better small/distant-face recall.
 - **Captioning** (`src/captioning/`): for every `HighlightClip` whose reframe is
   `ready`, `python -m src.captioning.run --job-id <ingestion_job_id> [--force]` burns
   short word-burst captions (2-4 words, ~TikTok style, not one-caption-per-sentence)
@@ -140,6 +142,42 @@ steps" for merge status):
   **UI work is paused** (per user, 2026-07-25) until all backend modules are done —
   later modules (highlights and beyond) are CLI-only for now, no frontend changes
   expected until that's revisited.
+
+**Local-model quality pass (2026-07-26)**, prompted by the same realization behind
+the LLM switch above — the 24GB GPU budget is no longer shared with a local LLM, so
+every model that still runs *locally* was re-evaluated for whether a higher-quality
+option now fits:
+- **YOLOv8-face `medium`→`xlarge`** (`yolov8x-face-lindevs.pt`, 68.1M params, the
+  largest `lindevs/yolov8-face` publishes) plus `imgsz=1280` (up from 640) for better
+  small/distant-face recall. A detection model's VRAM cost is small in absolute terms
+  even at xlarge, so this was a clean upgrade with no real downside.
+- **Whisper large-v3 stayed the same model** — it's already the largest/most accurate
+  standard faster-whisper checkpoint, nothing bigger exists to move up to
+  (distil-whisper trades accuracy for speed, the wrong direction here). The real
+  lever was an unused inference setting: `vad_filter=True` (`src/transcription/transcriber.py`)
+  strips silence before decoding, faster-whisper's own recommended setting for
+  real-world audio, reduces hallucinated text. `compute_type` deliberately stayed
+  `float16` (not `float32` — doubles VRAM/time for no meaningful WER gain on this
+  model) and `beam_size` stayed at the library default of 5 (already optimal; higher
+  has diminishing/negative returns) — both considered and explicitly rejected, not
+  overlooked.
+- **Light-ASD was evaluated for a swap and deliberately kept as-is.** It has no bigger
+  official checkpoint (being lightweight is the whole point of the model), so the only
+  real "upgrade" would be a different architecture entirely — TalkNet-ASD was
+  considered, but research surfaced that Light-ASD's own paper (arXiv 2303.04439)
+  claims ~94% mAP on AVA-ActiveSpeaker vs. TalkNet's officially reported ~90-92% mAP
+  on the same benchmark. The "bigger" alternative isn't established to actually be
+  more accurate, despite requiring a from-scratch vendoring project (new repo, new
+  preprocessing, no reuse of the current integration) — not worth that effort for a
+  likely lateral-or-worse accuracy move. Revisit only if a genuinely
+  benchmark-superior lightweight ASD model surfaces later.
+- **ByteTrack excluded** — it's a classical tracking algorithm (Kalman filter +
+  Hungarian matching via `supervision`), not a trained model with quality tiers, so
+  "model re-selection" doesn't apply to it.
+None of this has been verified against real footage yet (same caveat as the
+2026-07-25 reframe-module verification and the 2026-07-26 Claude API switch) — needs
+a real vast.ai run to confirm actual WER/detection-recall improvement and real VRAM
+usage at the new sizes.
 
 **Campaign briefs module removed (2026-07-25, per user direction).** Previously
 accepted a brief as pasted text or an uploaded PDF/DOCX/TXT file and stored it as-is,
@@ -305,19 +343,24 @@ Planned across 5 phases (details TBD as implementation proceeds).
 `vast-ai-e2e-prep` branch)** — all four stages ran for real end-to-end, but it
 surfaced the context-window bug described above (highlight-detection LLM stage). Fixed
 by switching to the Claude API (2026-07-26) plus quality upgrades (whisper `float16`,
-YOLOv8-face `medium`) using the VRAM the local LLM no longer needs. **Captioning
-(also 2026-07-26) is new since that run and has never been exercised on vast.ai at
-all.** Neither is yet re-verified with a real run — that's next:
+YOLOv8-face `medium`, later `xlarge`) using the VRAM the local LLM no longer needs.
+**Captioning and the further YOLOv8-face `xlarge`/`imgsz=1280`/whisper `vad_filter`
+pass (also 2026-07-26) are new since that run and have never been exercised on
+vast.ai at all.** None of this is yet re-verified with a real run — that's next:
 
 1. Re-run the full pipeline end-to-end on vast.ai with the current code
    (`vast-ai-e2e-prep` branch, updated `VAST_GUIDE.md`): confirm the Claude API
    actually produces well-distributed, genuinely hook-worthy candidates across a full
-   long video (not just the first minute); confirm whisper `float16`/YOLOv8-face
-   `medium` fit comfortably in the RTX 3090 24GB budget alongside the freed-up
-   headroom; confirm real per-video Claude API cost against the ~$0.20-0.31 estimate;
-   confirm the rented instance's ffmpeg has `libass`/`subtitles`-filter support and
-   that real word-burst caption timing/grouping actually looks good against real
-   speech, not just hand-written fake transcripts.
+   long video (not just the first minute); confirm whisper `float16`+`vad_filter` and
+   YOLOv8-face `xlarge`@`imgsz=1280` fit comfortably in the RTX 3090 24GB budget
+   alongside the freed-up headroom (re-check the real logged VRAM against the
+   ~10-13GB re-estimate in `docs/hardware-spec.md`); confirm real per-video Claude
+   API cost against the ~$0.20-0.31 estimate; confirm the rented instance's ffmpeg
+   has `libass`/`subtitles`-filter support and that real word-burst caption
+   timing/grouping actually looks good against real speech, not just hand-written
+   fake transcripts; confirm the `vad_filter`/`xlarge` changes actually measurably
+   improve transcript/detection quality rather than just costing more compute for no
+   real benefit.
 2. Get a real short face+speech test clip (e.g. a webcam recording) to close the one
    remaining local-verification gap: actual YOLOv8-face/ByteTrack/Light-ASD behavior
    against real content, still only checked for "doesn't crash" against a synthetic
