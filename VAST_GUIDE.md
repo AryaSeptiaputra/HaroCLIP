@@ -25,18 +25,24 @@ See `docs/hardware-spec.md` for the full breakdown. Short version:
 - **Python version: 3.10+ is fine, doesn't need to be exactly 3.13.** The codebase's
   local dev venv uses 3.13, but nothing in it is 3.13-exclusive (just modern `X | None`
   type hints, which work from 3.10 on) — use whatever `python3` the template ships.
-- **GPU**: 12–16GB is likely enough (e.g. RTX 3060 12GB, RTX 4070) — real peak VRAM
-  usage is ~7–8GB given every stage loads/frees its model sequentially, not
-  concurrently. A 24GB card (RTX 4090/3090) is a safety margin, not a requirement, and
-  costs more per hour. Pick based on your remaining budget.
+- **GPU: RTX 4090/3090 24GB** (decided 2026-07-26, not downsized). Real peak VRAM is
+  ~10–11GB (whisper `float16` is now the single biggest local stage, since highlight
+  detection runs on the Claude API instead of a local GPU model — see
+  `docs/hardware-spec.md`) so a 12-16GB card would technically fit, but the 24GB tier
+  is kept deliberately: the VRAM the local LLM no longer needs was redirected into
+  quality upgrades (whisper `float16`, YOLOv8-face `medium`) rather than downsizing for
+  cost. Don't pick a smaller card to save money here — that would undo the deliberate
+  quality tradeoff already made.
 - **vCPU/RAM**: 8+ cores, 32GB+ RAM (ffmpeg decode/encode benefits from multi-core).
-- **Storage: ~40-50GB is enough, not 100GB.** Real breakdown for a ~1hr 1080p test
-  video: source video ~0.5-2.5GB, whisper large-v3 int8 ~3GB, **Qwen2.5-7B-Instruct
-  ~15GB** (the *downloaded* checkpoint is full fp16 precision — 4-bit quantization
-  happens in VRAM at load time, it does not shrink the on-disk download), pip packages
-  ~3-5GB, weights/outputs <1GB. ~25GB real usage; 40-50GB gives comfortable margin.
-  Only go bigger if testing a much longer video or planning multiple videos per
-  instance.
+- **Storage: ~25-30GB is enough, not 100GB.** Real breakdown for a ~1hr 1080p test
+  video: source video ~0.5-2.5GB, whisper large-v3 checkpoint ~3GB (same download size
+  regardless of int8/float16 — quantization affects VRAM at inference, not the
+  on-disk checkpoint), pip packages ~3-5GB, weights/outputs <1GB. **No local LLM
+  checkpoint to download at all** — highlight detection is a Claude API call now, not
+  a local model, which removes what used to be the single largest download
+  (Qwen2.5-7B-Instruct, ~15GB fp16) entirely. ~10GB real usage; 25-30GB gives
+  comfortable margin. Only go bigger if testing a much longer video or planning
+  multiple videos per instance.
 - **On-demand, not interruptible/spot** — a preempted mid-render job wastes the whole
   run.
 - Filter by GPU **and** vCPU/RAM together — host specs vary between listings with the
@@ -66,17 +72,29 @@ apt-get update && apt-get install -y ffmpeg   # most PyTorch templates don't inc
 
 pip install -r requirements.txt
 # torch is already installed by the template — do NOT reinstall it, that's the
-# multi-GB download this approach specifically avoids. Everything else:
-pip install faster-whisper transformers accelerate bitsandbytes \
-    ultralytics supervision python_speech_features
+# multi-GB download this approach specifically avoids. Everything else (note:
+# no transformers/accelerate/bitsandbytes needed anymore — highlight detection
+# is a Claude API call, not a local model):
+pip install faster-whisper ultralytics supervision python_speech_features
 
 mkdir -p data/models
-curl -L "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8n-face-lindevs.pt" \
-    -o data/models/yolov8n-face-lindevs.pt
+curl -L "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8m-face-lindevs.pt" \
+    -o data/models/yolov8m-face-lindevs.pt
 ```
 
 Light-ASD's weights don't need a separate download — they're vendored and committed in
 git, already present after `git clone`.
+
+**Set your Claude API key** — required for the highlight-detection stage:
+
+```bash
+export ANTHROPIC_API_KEY=<your-key>
+```
+
+Get it from [console.anthropic.com](https://console.anthropic.com/settings/keys). Same
+handling rules as `HF_TOKEN` below: never commit it, never bake it into the Dockerfile
+as a static `ENV` line (image layers are inspectable) — export it in the shell only, or
+put it in a gitignored `.env` file on the instance.
 
 **Then apply two fixes confirmed necessary on a real run** (do these now, proactively
 — both were hit during actual testing, not hypothetical):
@@ -90,7 +108,9 @@ export LD_LIBRARY_PATH=`python3 -c 'import os; import nvidia.cublas.lib, nvidia.
 
 # 2. huggingface_hub's Rust-based hf-xet fast-download accelerator is unreliable —
 #    crashed with "Internal Writer Error: Background writer channel closed" downloading
-#    Qwen2.5-7B. Force the plain Python downloader instead.
+#    a model on a prior run. Force the plain Python downloader instead. Still relevant
+#    even though the LLM stage moved off Hugging Face entirely — whisper's checkpoint
+#    still downloads through the same hf-xet path.
 export HF_HUB_DISABLE_XET=1
 
 # Optional but recommended: avoids the "unauthenticated requests" HF Hub rate-limit
@@ -118,9 +138,10 @@ logs:        data/logs/<uuid>/
 final clips: data/reframed/
 ```
 
-Whisper-large-v3 and Qwen2.5-7B-Instruct auto-download from Hugging Face on first use
-(a few GB total, one-time per instance) — the very first run will be slower than
-subsequent ones for this reason alone, separate from actual processing time.
+Whisper-large-v3 auto-downloads from Hugging Face on first use (~3GB, one-time per
+instance) — the very first run will be slower than subsequent ones for this reason
+alone, separate from actual processing time. No local LLM checkpoint to wait on
+anymore — highlight detection calls the Claude API directly.
 
 ### If it fails partway through
 
@@ -169,7 +190,11 @@ you need.
   did the LLM pick genuinely interesting moments, or did most candidates get rejected
   by validation (check `parse_candidates` rejection reasons)?
 - Every log's `VRAM after ...` lines — compare against `docs/hardware-spec.md`'s
-  ~7–8GB peak estimate, note if it's meaningfully different so the doc can be corrected.
+  re-corrected ~10–11GB peak estimate (whisper `float16` is now the single biggest
+  local stage), note if it's meaningfully different so the doc can be corrected.
+- `highlights.log`'s token-usage line (input/output tokens from the Claude API
+  response) — compare the real per-video cost against the ~$0.20–0.31 estimate in
+  `docs/hardware-spec.md`.
 
 ## Known gotchas
 
@@ -179,14 +204,11 @@ reference/in case they resurface):
 - `libcublas.so.12 is not found or cannot be loaded` at the whisper transcription
   step — fixed by installing `nvidia-cublas-cu12`/`nvidia-cudnn-cu12` and setting
   `LD_LIBRARY_PATH` to their install location (step 2).
-- `Internal Writer Error: Background writer channel closed` downloading Qwen2.5-7B —
-  `hf-xet`'s Rust downloader crashing. Fixed by `HF_HUB_DISABLE_XET=1` (step 2). If it
-  recurs even with that set, `pip uninstall -y hf-xet` to remove it entirely.
-
-Not yet confirmed either way on vast.ai (from local Windows dev only):
-
-- `bitsandbytes` (needed for 4-bit Qwen2.5-7B) has historically had rockier Windows
-  support but should install cleanly on vast.ai's Linux environment.
+- `Internal Writer Error: Background writer channel closed` downloading a model from
+  Hugging Face — `hf-xet`'s Rust downloader crashing. Fixed by `HF_HUB_DISABLE_XET=1`
+  (step 2). If it recurs even with that set, `pip uninstall -y hf-xet` to remove it
+  entirely. This was hit downloading the old local Qwen2.5-7B checkpoint, but the same
+  `hf-xet` path is still used for whisper's checkpoint, so the fix stays relevant.
 
 ## About the Dockerfile
 

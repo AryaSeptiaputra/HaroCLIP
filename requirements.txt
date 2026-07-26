@@ -17,10 +17,11 @@ numpy
 # --- Speech-to-text (heavy, GPU-oriented — confirm before installing) ---
 # faster-whisper
 
-# --- Highlight detection LLM (heavy, GPU-oriented — confirm before installing) ---
-# transformers      # loads Qwen2.5-7B-Instruct for highlight-candidate generation
-# accelerate
-# bitsandbytes      # 4-bit quantization
+# --- Highlight detection LLM ---
+# Claude API (Anthropic) — not a local/GPU model. Decided 2026-07-25: cost/complexity
+# analysis (context-window math, download-bottleneck risk, GPU budget) favored a
+# hosted API over a local model for this stage. See CLAUDE.md.
+anthropic
 
 # --- Detection / tracking (heavy, GPU-oriented — confirm before installing) ---
 # ultralytics       # YOLOv8-face

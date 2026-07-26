@@ -29,18 +29,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 # dev; this image *is* the confirmed production install, so they're installed
 # explicitly here rather than by uncommenting requirements.txt (keeps that file as
 # the single source of truth for "what needs confirming before a local install").
+# Note: highlight detection uses the Claude API (anthropic, already in
+# requirements.txt), not a local LLM — no transformers/accelerate/bitsandbytes needed.
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124
 RUN pip install --no-cache-dir \
         faster-whisper \
-        transformers accelerate bitsandbytes \
         ultralytics supervision python_speech_features
 
-# --- YOLOv8-face weights (the one weight file not already vendored in git —
-# Light-ASD's weights are committed under src/detection/light_asd/weight/ and arrive
-# via COPY below) ---
+# --- YOLOv8-face weights, medium variant (the one weight file not already vendored in
+# git — Light-ASD's weights are committed under src/detection/light_asd/weight/ and
+# arrive via COPY below). Medium, not nano: VRAM freed by moving the highlight LLM to
+# the Claude API went toward better face-detection accuracy instead. ---
 RUN mkdir -p data/models && curl -L \
-        "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8n-face-lindevs.pt" \
-        -o data/models/yolov8n-face-lindevs.pt
+        "https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8m-face-lindevs.pt" \
+        -o data/models/yolov8m-face-lindevs.pt
 
 COPY . .
 

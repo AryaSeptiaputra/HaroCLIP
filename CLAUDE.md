@@ -4,16 +4,17 @@
 
 HaroClip automatically generates video clips/highlights from a source video, aimed at
 creator/marketing use cases: submit a video link, it downloads the video, transcribes
-it, uses a local LLM to find "hook"-worthy highlight segments, and renders each as a
+it, uses the Claude API to find "hook"-worthy highlight segments, and renders each as a
 dynamic vertical-crop clip that follows the speaker.
 
 ## Tech stack
 
-- **faster-whisper** — speech-to-text
-- **Qwen2.5-7B-Instruct** (via `transformers`/`bitsandbytes`, 4-bit) — local LLM for
-  highlight-detection ("hook" scoring from transcript, not an external API)
+- **faster-whisper** — speech-to-text (float16, GPU)
+- **Claude API** (Anthropic, `anthropic` SDK) — highlight-detection ("hook" scoring
+  from the full transcript in one call, no local model/GPU involved). Was a local LLM
+  (Qwen2.5-7B-Instruct) until 2026-07-25 — see "Current status" for why that changed.
 - **Light-ASD** — active speaker detection (vendored from source, no PyPI package)
-- **YOLOv8-face** (ultralytics) — face detection
+- **YOLOv8-face** (ultralytics, **medium** variant) — face detection
 - **ByteTrack** — object/face tracking
 - **ffmpeg** — rendering/video processing
 - **FastAPI** — backend API layer (job orchestration)
@@ -50,20 +51,38 @@ dynamic vertical-crop clip that follows the speaker.
 - **Highlight detection** (`src/highlights/`, `src/transcription/`, `src/rendering/`):
   given a `ready` `ProcessingJob`, `python -m src.highlights.run --job-id
   <ingestion_job_id> [--force]` transcribes `audio.wav` via faster-whisper
-  (large-v3/int8), feeds the timestamped transcript to a **local LLM
-  (Qwen2.5-7B-Instruct, 4-bit via `transformers`+`bitsandbytes`)** prompted with
-  hand-designed "hook" principles (`src/highlights/prompt.py` — curiosity gap,
+  (large-v3/**float16**), feeds the timestamped transcript to the **Claude API**
+  (`src/highlights/llm.py`, `anthropic` SDK — `ANTHROPIC_API_KEY` required) prompted
+  with hand-designed "hook" principles (`src/highlights/prompt.py` — curiosity gap,
   surprising claim, emotional peak, concrete insight, controversial opinion; clips
-  ~15-60s, natural sentence boundaries, self-contained) to get 5-10 ranked candidate
-  segments as strict JSON (`src/highlights/llm.py` parses + validates
-  timestamps/duration, drops malformed entries rather than failing the whole job), then
-  renders each as a static clip via ffmpeg (`src/rendering/clipper.py` — plain temporal
-  cut, `-ss`/`-t` as *input* options so re-encoding stays frame-accurate without the
-  `-ss`+`-to` absolute-timeline gotcha). Tracked in `highlight_jobs`/`highlight_clips`,
-  same loose string-reference convention as `processing_jobs`. **Local LLM choice was
-  an explicit user decision** (not an external API) — VRAM budget assumes sequential
-  load/free per stage (whisper freed before the LLM loads), see
-  `docs/hardware-spec.md`.
+  **30s-3min**, spread across the *entire* video rather than clustered in one section,
+  natural sentence boundaries, self-contained) to get 5-10 ranked candidate segments as
+  strict JSON (`parse_candidates` validates timestamps/duration, drops malformed
+  entries rather than failing the whole job), then renders each as a static clip via
+  ffmpeg (`src/rendering/clipper.py` — plain temporal cut, `-ss`/`-t` as *input* options
+  so re-encoding stays frame-accurate without the `-ss`+`-to` absolute-timeline gotcha).
+  Tracked in `highlight_jobs`/`highlight_clips`, same loose string-reference convention
+  as `processing_jobs`.
+
+  **LLM choice switched from local (Qwen2.5-7B) to the Claude API on 2026-07-26**,
+  after the first real vast.ai run (57-min video) exposed a real bug: all 10 returned
+  candidates clustered in the first 89 seconds, in mechanical back-to-back 5s chunks —
+  not genuine hook selection. Root cause: the full formatted transcript (57k chars,
+  2062 timestamped segments) came to roughly **31k tokens, right at Qwen2.5-7B's
+  32,768-token context limit**, triggering "lost in the middle" degradation rather
+  than an outright truncation error. Cost/architecture analysis before switching:
+  Claude's much larger context window fits a 2-3hr video's transcript in one call with
+  no chunking needed; per-video API cost estimate (~$0.20-0.31, Sonnet-tier, unverified
+  current pricing — check anthropic.com/pricing) came in at or below the self-hosted
+  GPU-rental estimate once the local model's one-time checkpoint-download bottleneck
+  (up to ~75min for a 72B model) was factored in; and it removes the highlight stage's
+  GPU/VRAM requirement entirely. **User kept the same RTX 3090 24GB GPU tier anyway**
+  and redirected the VRAM the local LLM no longer needs toward quality upgrades on the
+  stages that still run locally: whisper `int8`→`float16`, YOLOv8-face `nano`→
+  `medium`. `HIGHLIGHT_LLM_MODEL` env var (default `claude-sonnet-5`) still exists for
+  overriding which Claude model is used; `HIGHLIGHT_LLM_4BIT`/`HIGHLIGHT_LLM_DEVICE_MAP`
+  were removed (not applicable to an API call). See `docs/hardware-spec.md` for the
+  revised VRAM/GPU accounting and `VAST_GUIDE.md` for updated setup steps.
 - **Reframe** (`src/reframe/`, `src/detection/`, `src/tracking/`): for every
   `HighlightClip`, `python -m src.reframe.run --job-id <ingestion_job_id> [--force]`
   samples the clip at a fixed 5fps (cost scales with sampled frame count, not full
@@ -129,12 +148,15 @@ weights, or a scoring exception. This means the pipeline behaves the same whethe
 not `torch`/`python_speech_features` + weights are actually available — zero risk of
 the whole job failing just because ASD couldn't run.
 
-Heavy ML dependencies (`faster-whisper`, `transformers`/`accelerate`/`bitsandbytes`,
-`ultralytics`, `supervision`, `torch`, `torchvision`) remain commented out in
-`requirements.txt` and not installed — deferred until run on a real vast.ai GPU
-instance. (Lesson learned early on: a blanket `pip install -r requirements.txt` once
-pulled these in transitively because the original skeleton had them uncommented —
-always check what's already uncommented before running a blanket install.)
+Heavy ML dependencies (`faster-whisper`, `ultralytics`, `supervision`, `torch`,
+`torchvision`) remain commented out in `requirements.txt` and not installed — deferred
+until run on a real vast.ai GPU instance. (Lesson learned early on: a blanket `pip
+install -r requirements.txt` once pulled these in transitively because the original
+skeleton had them uncommented — always check what's already uncommented before running
+a blanket install.) `transformers`/`accelerate`/`bitsandbytes` were removed from this
+list entirely on 2026-07-26 — no longer needed anywhere now that highlight detection
+uses the Claude API instead of a local LLM. `anthropic` (the Claude SDK) is a normal
+unconditional dependency instead — lightweight, no GPU/CUDA involved.
 
 **Verification caveat (highlights-module):** local dev has no CUDA GPU, so only the
 non-GPU parts of highlight detection were verified on this path — package imports
@@ -161,8 +183,9 @@ cache, RTX 3050 4GB present but unused since torch is the CPU build — see tool
   audio with `WHISPER_MODEL_SIZE=tiny`, `WHISPER_DEVICE=cpu` — confirmed model load +
   inference + correctly-typed `TranscriptSegment` results (content is garbage, as
   expected — the test audio is a sine tone, not speech).
-- **Highlight LLM**: `generate_candidates()` ran for real against a fake transcript
-  with `HIGHLIGHT_LLM_MODEL=Qwen/Qwen2.5-0.5B-Instruct`, `HIGHLIGHT_LLM_4BIT=0`,
+- **Highlight LLM (historical — this local-model path no longer exists, see "LLM
+  choice switched..." above)**: `generate_candidates()` ran for real against a fake
+  transcript with `HIGHLIGHT_LLM_MODEL=Qwen/Qwen2.5-0.5B-Instruct`, `HIGHLIGHT_LLM_4BIT=0`,
   `HIGHLIGHT_LLM_DEVICE_MAP=cpu` — produced syntactically valid JSON (confirms the
   prompt→generation→parsing wiring is correct) but with all-zero timestamps, which
   `parse_candidates()` correctly rejected. This is the small model's capability limit
@@ -170,7 +193,9 @@ cache, RTX 3050 4GB present but unused since torch is the CPU build — see tool
   code bug — the validator did exactly its job. `run_highlight_detection()` run
   end-to-end for real reaches `FAILED`/`no valid highlight candidates survived
   validation` for this same reason, confirming the full chain (transcribe → generate →
-  parse) executes correctly up through this small model's actual limitation.
+  parse) executes correctly up through this small model's actual limitation. Kept here
+  as historical record of real local-model verification; superseded once the real
+  vast.ai run surfaced the context-window bug that motivated the Claude API switch.
 - **Detection**: `FaceDetector.detect()` ran for real (`yolov8n-face-lindevs.pt`,
   downloaded to `data/models/`) against a synthetic test frame — 0 boxes (no real face
   present), confirms model load + inference + return-type correctness.
@@ -192,19 +217,21 @@ verification possible without matching CUDA driver versions: `light_asd/asd.py`
 (`torch.device("cuda" if torch.cuda.is_available() else "cpu")` instead of upstream's
 hardcoded `.cuda()`), `asd_scoring.py`'s ensemble scoring (`.to(self._model.device)`
 instead of `.cuda()`), and every `torch.cuda.empty_cache()` cleanup call across
-`transcriber.py`/`llm.py`/`face_detector.py` now guarded with
-`if torch.cuda.is_available()`. New env vars for this same purpose, all defaulting to
-production behavior when unset: `WHISPER_MODEL_SIZE` (default `large-v3`),
-`WHISPER_DEVICE` (default `cuda`), `HIGHLIGHT_LLM_MODEL` (default
-`Qwen/Qwen2.5-7B-Instruct`), `HIGHLIGHT_LLM_4BIT` (default on), `HIGHLIGHT_LLM_DEVICE_MAP`
-(default `cuda`). None of this changes behavior on the real vast.ai deployment target
-(CUDA always available there) — it only makes local CPU verification possible.
+`transcriber.py`/`face_detector.py` now guarded with `if torch.cuda.is_available()`.
+Env vars for this same purpose, defaulting to production behavior when unset:
+`WHISPER_MODEL_SIZE` (default `large-v3`), `WHISPER_DEVICE` (default `cuda`). None of
+this changes behavior on the real vast.ai deployment target (CUDA always available
+there) — it only makes local CPU verification possible. (`HIGHLIGHT_LLM_4BIT`/
+`HIGHLIGHT_LLM_DEVICE_MAP` mentioned in older versions of this doc no longer exist —
+removed when highlight detection moved to the Claude API, see "LLM choice switched..."
+above; `HIGHLIGHT_LLM_MODEL` still exists but now selects a Claude model name.)
 
 **Still unverified even after this pass:** actual production-scale model quality —
-whisper large-v3 transcription accuracy, Qwen2.5-7B highlight judgment, YOLOv8-face/
-ByteTrack/Light-ASD *accuracy* against real footage (vs. just "doesn't crash" against a
-synthetic video with zero real faces) — needs either a real face+speech test clip
-locally or a real vast.ai GPU run.
+whisper large-v3 transcription accuracy, real Claude highlight judgment on a full-length
+video (the 57-min vast.ai test ran on the old local-LLM path, before this switch),
+YOLOv8-face/ByteTrack/Light-ASD *accuracy* against real footage (vs. just "doesn't
+crash" against a synthetic video with zero real faces) — needs either a real
+face+speech test clip locally or another real vast.ai run with the current code.
 
 **Tooling notes (discovered this session, cost real debugging time — read before
 running anything ML-related locally):**
@@ -237,17 +264,27 @@ Planned across 5 phases (details TBD as implementation proceeds).
 
 ## Next steps (not yet started — waiting on direction)
 
-1. Get a real short face+speech test clip (e.g. a webcam recording) to close the one
+**A real vast.ai run already happened (2026-07-25, 57-min video, RTX 3090-class,
+`vast-ai-e2e-prep` branch)** — all four stages ran for real end-to-end, but it
+surfaced the context-window bug described above (highlight-detection LLM stage). Fixed
+by switching to the Claude API (2026-07-26) plus quality upgrades (whisper `float16`,
+YOLOv8-face `medium`) using the VRAM the local LLM no longer needs. **Not yet
+re-verified with these fixes** — that's next:
+
+1. Re-run the full pipeline end-to-end on vast.ai with the current code
+   (`vast-ai-e2e-prep` branch, updated `VAST_GUIDE.md`): confirm the Claude API
+   actually produces well-distributed, genuinely hook-worthy candidates across a full
+   long video (not just the first minute); confirm whisper `float16`/YOLOv8-face
+   `medium` fit comfortably in the RTX 3090 24GB budget alongside the freed-up
+   headroom; confirm real per-video Claude API cost against the ~$0.20-0.31 estimate.
+2. Get a real short face+speech test clip (e.g. a webcam recording) to close the one
    remaining local-verification gap: actual YOLOv8-face/ByteTrack/Light-ASD behavior
    against real content, still only checked for "doesn't crash" against a synthetic
-   video with zero real faces so far.
-2. Run the full pipeline end-to-end on a real vast.ai GPU instance with production-size
-   models (whisper large-v3, Qwen2.5-7B) and the manually-downloaded (or Docker-baked)
-   YOLOv8-face weights in place: transcription accuracy, LLM highlight quality at full
-   model size, real-footage detection/tracking/ASD accuracy, actual VRAM usage vs
-   `docs/hardware-spec.md` estimates. Wiring for all four stages is now verified
-   locally (small-model substitutes, real inference, not mocks) — this is about
-   production-scale model quality and real GPU resource usage specifically.
+   video with zero real faces, or against the first vast.ai run's footage which wasn't
+   independently reviewed frame-by-frame.
+3. Merge `vast-ai-e2e-prep` into `main` once the re-run above confirms the fixes work
+   — not merged yet, per the project's need-driven (not completion-order) merge
+   policy.
 
 ## Working conventions
 

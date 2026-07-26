@@ -6,8 +6,10 @@ import numpy as np
 from src.detection.schemas import FaceBox
 from src.utils.logging import log_vram
 
+# medium (not nano): freed VRAM budget from moving highlight-detection to the Claude
+# API went toward better face-detection accuracy instead. See docs/hardware-spec.md.
 YOLOV8_FACE_WEIGHTS_PATH = os.getenv(
-    "YOLOV8_FACE_WEIGHTS_PATH", "data/models/yolov8n-face-lindevs.pt"
+    "YOLOV8_FACE_WEIGHTS_PATH", "data/models/yolov8m-face-lindevs.pt"
 )
 CONFIDENCE_THRESHOLD = 0.5
 

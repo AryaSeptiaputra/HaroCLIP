@@ -15,11 +15,14 @@ the answer.
 Rules for choosing clip boundaries:
 - Use only the given segment timestamps as candidate cut points — never invent a \
 timestamp that falls in the middle of a segment.
-- Each clip should be roughly 15-60 seconds, and no more than 90 seconds, unless the \
-moment genuinely cannot be told any shorter.
+- Each clip should be between 30 seconds and 3 minutes (180 seconds) long. Prefer the \
+shorter end of that range unless the moment genuinely needs more room to land.
 - Each clip must be self-contained: understandable on its own, without needing the \
 rest of the video for context.
 - Start and end on natural sentence/thought boundaries.
+- Candidates should be spread across the **entire** video, not clustered in one \
+section — you are given the full transcript precisely so you can compare moments \
+across the whole thing and pick the best ones overall, not just the first ones you see.
 
 Output contract:
 - Respond with STRICT JSON ONLY — a single JSON array, nothing before or after it.

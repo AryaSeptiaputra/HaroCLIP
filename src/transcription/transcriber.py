@@ -8,7 +8,10 @@ from src.utils.logging import log_vram
 
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "large-v3")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
-WHISPER_COMPUTE_TYPE = "int8"
+# float16 (not int8): with the highlight-detection LLM moved to the Claude API, this
+# is now the only model resident during highlight detection — VRAM budget allows the
+# more precise compute type. See docs/hardware-spec.md.
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
 
 
 def transcribe(audio_path: Path, logger: logging.Logger | None = None) -> list[TranscriptSegment]:

@@ -7,65 +7,49 @@ import time
 from src.highlights.exceptions import HighlightError
 from src.highlights.prompt import build_messages
 from src.transcription.schemas import TranscriptSegment
-from src.utils.logging import log_vram
 
-LLM_MODEL_NAME = os.getenv("HIGHLIGHT_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
-LLM_USE_4BIT = os.getenv("HIGHLIGHT_LLM_4BIT", "1") != "0"
-LLM_DEVICE_MAP = os.getenv("HIGHLIGHT_LLM_DEVICE_MAP", "cuda")
+LLM_MODEL_NAME = os.getenv("HIGHLIGHT_LLM_MODEL", "claude-sonnet-5")
 MAX_NEW_TOKENS = 2048
 MAX_CANDIDATES = 10
-MIN_CLIP_SECONDS = 5
-MAX_CLIP_SECONDS = 120
+MIN_CLIP_SECONDS = 30
+MAX_CLIP_SECONDS = 180
 
 JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 
 def generate_candidates(segments: list[TranscriptSegment], logger: logging.Logger | None = None) -> str:
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import anthropic
+
+    messages = build_messages(segments)
+    system_prompt = next(m["content"] for m in messages if m["role"] == "system")
+    user_messages = [m for m in messages if m["role"] != "system"]
 
     if logger:
-        logger.info("loading highlight LLM model=%s 4bit=%s device_map=%s", LLM_MODEL_NAME, LLM_USE_4BIT, LLM_DEVICE_MAP)
-    load_start = time.monotonic()
-    tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
-    if LLM_USE_4BIT:
-        from transformers import BitsAndBytesConfig
+        transcript_chars = sum(len(m["content"]) for m in user_messages)
+        logger.info(
+            "calling Claude API model=%s (transcript ~%d chars, no chunking needed — "
+            "well within context window)",
+            LLM_MODEL_NAME, transcript_chars,
+        )
 
-        model = AutoModelForCausalLM.from_pretrained(
-            LLM_MODEL_NAME,
-            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
-            device_map=LLM_DEVICE_MAP,
-        )
-    else:
-        # fp16 on CPU can hit "not implemented for Half" on some ops; fp32 on CPU,
-        # fp16 on CUDA (matches production).
-        dtype = torch.float16 if LLM_DEVICE_MAP == "cuda" else torch.float32
-        model = AutoModelForCausalLM.from_pretrained(
-            LLM_MODEL_NAME, torch_dtype=dtype, device_map=LLM_DEVICE_MAP
-        )
+    client = anthropic.Anthropic()
+    call_start = time.monotonic()
+    response = client.messages.create(
+        model=LLM_MODEL_NAME,
+        max_tokens=MAX_NEW_TOKENS,
+        system=system_prompt,
+        messages=user_messages,
+    )
+    raw_response = "".join(block.text for block in response.content if block.type == "text")
+
     if logger:
-        logger.info("highlight LLM loaded in %.1fs", time.monotonic() - load_start)
-        log_vram(logger, "highlight LLM load")
-    try:
-        messages = build_messages(segments)
-        prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+        logger.info(
+            "Claude API call done in %.1fs: input_tokens=%d output_tokens=%d",
+            time.monotonic() - call_start, response.usage.input_tokens, response.usage.output_tokens,
         )
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        generate_start = time.monotonic()
-        output_ids = model.generate(
-            **inputs, max_new_tokens=MAX_NEW_TOKENS, do_sample=False
-        )
-        new_tokens = output_ids[0][inputs["input_ids"].shape[1] :]
-        raw_response = tokenizer.decode(new_tokens, skip_special_tokens=True)
-        if logger:
-            logger.info("LLM generation done in %.1fs, %d new tokens", time.monotonic() - generate_start, len(new_tokens))
-            logger.info("raw LLM response:\n%s", raw_response)
-        return raw_response
-    finally:
-        del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        logger.info("raw LLM response:\n%s", raw_response)
+
+    return raw_response
 
 
 def parse_candidates(
