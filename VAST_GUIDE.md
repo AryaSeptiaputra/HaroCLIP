@@ -1,8 +1,9 @@
 # HaroClip — vast.ai End-to-End Test Guide
 
 Step-by-step for running the full pipeline (ingestion → download → highlight
-detection → dynamic-crop reframe) on a rented vast.ai GPU instance. Written for a
-**single, credit-constrained run** — follow it in order rather than improvising.
+detection → dynamic-crop reframe → caption burn-in) on a rented vast.ai GPU instance.
+Written for a **single, credit-constrained run** — follow it in order rather than
+improvising.
 
 Branch to test: `vast-ai-e2e-prep` (not yet merged to `main` — merge only after this
 test succeeds, so any fixes needed land in the same branch).
@@ -128,14 +129,15 @@ connection drops and you reconnect, run them again before resuming with `--job-i
 python3 -m src.pipeline.run --url "https://youtu.be/q44ozTxnU8A?si=wR5jQi7c9vxFSWQG"
 ```
 
-This chains all four stages (ingestion → processing → highlights → reframe)
-automatically, printing a `[1/4]`...`[4/4]` progress summary and, on success, the
-ingestion job id plus where results landed:
+This chains all five stages (ingestion → processing → highlights → reframe →
+captioning) automatically, printing a `[1/5]`...`[5/5]` progress summary and, on
+success, the ingestion job id plus where results landed:
 
 ```
 === DONE. ingestion job id: <uuid> ===
-logs:        data/logs/<uuid>/
-final clips: data/reframed/
+logs:          data/logs/<uuid>/
+reframed clips: data/reframed/
+captioned clips (final deliverable): data/captioned/
 ```
 
 Whisper-large-v3 auto-downloads from Hugging Face on first use (~3GB, one-time per
@@ -161,13 +163,21 @@ Every stage is idempotent (short-circuits if already `ready` unless you also pas
 Everything lands under `HaroCLIP/data/` (set via `DATA_DIR`, defaults to `./data`
 relative to wherever you ran the command):
 
-- `data/logs/<ingestion_job_id>/` — four files (`ingestion.log`, `processing.log`,
-  `highlights.log`, `reframe.log`). **These are what to bring back for quality
-  analysis** — they contain the full transcript, the full raw LLM response, why each
-  candidate was accepted/rejected, detection/tracking counts, which active-speaker
-  method actually ran (real Light-ASD vs. heuristic fallback — check this, it tells you
-  whether the ASD deps/weights actually worked), and VRAM usage after each model load.
-- `data/reframed/*.mp4` — the final dynamic vertical-crop clips.
+- `data/logs/<ingestion_job_id>/` — five files (`ingestion.log`, `processing.log`,
+  `highlights.log`, `reframe.log`, `captioning.log`). **These are what to bring back
+  for quality analysis** — they contain the full transcript, the full raw LLM response,
+  why each candidate was accepted/rejected, detection/tracking counts, which
+  active-speaker method actually ran (real Light-ASD vs. heuristic fallback — check
+  this, it tells you whether the ASD deps/weights actually worked), VRAM usage after
+  each model load, and (in `captioning.log`) word/cue counts per clip and ffmpeg
+  burn-in duration.
+- `data/captioned/*.mp4` — **the final deliverable**: reframed clips with captions
+  burned in.
+- `data/reframed/*.mp4` — the dynamic vertical-crop clips *before* captioning (useful
+  to compare against `data/captioned/` if caption placement/timing looks off).
+- `data/captions/*.srt` — the generated subtitle files, one per clip — open these
+  directly if you want to check caption text/timing without opening the burned-in
+  video.
 - `data/clips/<ingestion_job_id>/` — the intermediate static clips (before reframing).
 - `data/haroclip.db` — SQLite DB with full job status/metadata if useful.
 
@@ -195,6 +205,11 @@ you need.
 - `highlights.log`'s token-usage line (input/output tokens from the Claude API
   response) — compare the real per-video cost against the ~$0.20–0.31 estimate in
   `docs/hardware-spec.md`.
+- `data/captioned/*.mp4`: actually watch a clip (or at least seek through it) — this
+  is the one stage that's never been checked against real speech, only hand-written
+  fake transcripts locally. Confirm captions are legible, correctly timed to the
+  audio, and grouped at a sensible 2-4-word burst size (`captioning.log` has the
+  word/cue counts if the grouping looks off).
 
 ## Known gotchas
 
@@ -210,6 +225,16 @@ reference/in case they resurface):
   entirely. This was hit downloading the old local Qwen2.5-7B checkpoint, but the same
   `hf-xet` path is still used for whisper's checkpoint, so the fix stays relevant.
 
+Not yet confirmed either way on vast.ai (worked locally, but that's a different ffmpeg
+build):
+
+- **Captioning's burn-in relies on the ffmpeg build having `libass` compiled in** (the
+  `subtitles` filter). This is standard on Ubuntu's `apt` ffmpeg package and most
+  distro/static builds, but if `captioning.log` shows an `ffmpeg caption burn-in
+  failed` error mentioning `subtitles` or `No such filter`, that's the cause — check
+  with `ffmpeg -filters | grep subtitles` and, if missing, reinstall ffmpeg via `apt`
+  rather than whatever the base template shipped.
+
 ## About the Dockerfile
 
 `Dockerfile` in the repo root builds a fully self-contained image (CUDA base + every
@@ -221,7 +246,7 @@ test's critical path.
 
 ## Bring back to Claude
 
-Once you have `data/logs/<ingestion_job_id>/` locally, hand the four log files back for
+Once you have `data/logs/<ingestion_job_id>/` locally, hand the five log files back for
 analysis — that's the whole point of the logging added this session. Also mention:
 total wall-clock time, which GPU/VRAM you actually rented, which template you used, and
 whether setup or the run itself took unexpectedly long, so cost/time estimates in

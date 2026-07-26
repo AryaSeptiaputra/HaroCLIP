@@ -12,6 +12,8 @@ This doc records the sizing decision so it doesn't need to be re-derived each se
   see `CLAUDE.md`'s "Current status" for the full rationale (context-window bug found
   on the first real vast.ai run)
 - Face detection: YOLOv8-face **medium** variant — upgraded from `nano` on 2026-07-26
+- Captioning: ffmpeg `subtitles` filter burn-in (added 2026-07-26) — CPU-bound
+  re-encode, no GPU/VRAM use, see `CLAUDE.md`'s "Captioning" bullet
 - Source video worst case: 1–3 hour VOD/podcast, 1080p
 - Use case: production, single-user personal use (not multi-tenant SaaS)
 - Budget: ~$0.30–0.60/hr
@@ -26,6 +28,7 @@ This doc records the sizing decision so it doesn't need to be re-derived each se
 | Active Speaker Detection | Light-ASD | ~1–2 GB | Per face-track, low overhead vs whisper |
 | Tracking | ByteTrack | 0 (CPU-only) | Kalman filter + Hungarian matching |
 | Rendering | ffmpeg (libx264, CPU) | 0 | NVENC not used yet — see note below |
+| Captioning | ffmpeg `subtitles` filter burn-in (libass, CPU) | 0 | Added 2026-07-26 — re-encode pass, CPU-bound like rendering; requires the ffmpeg build to have `libass` compiled in (standard on most distro builds) |
 | Overhead | CUDA context (fresh per model load) | ~1–1.5 GB | Paid once per stage, not cumulative — see below |
 
 **Peak VRAM re-corrected (2026-07-26): ~10–11 GB, not the prior ~7–8 GB estimate.**

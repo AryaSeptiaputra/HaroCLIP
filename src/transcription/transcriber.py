@@ -3,7 +3,7 @@ import os
 import time
 from pathlib import Path
 
-from src.transcription.schemas import TranscriptSegment
+from src.transcription.schemas import TranscriptSegment, TranscriptWord
 from src.utils.logging import log_vram
 
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "large-v3")
@@ -29,9 +29,20 @@ def transcribe(audio_path: Path, logger: logging.Logger | None = None) -> list[T
         log_vram(logger, "whisper model load")
     try:
         transcribe_start = time.monotonic()
-        segments, _info = model.transcribe(str(audio_path))
+        # word_timestamps=True: needed for word-burst caption generation
+        # (src/captioning/) — same model, no extra VRAM/pass, faster-whisper derives
+        # per-word timing from the same forward pass as the segment-level text.
+        segments, _info = model.transcribe(str(audio_path), word_timestamps=True)
         result = [
-            TranscriptSegment(start=seg.start, end=seg.end, text=seg.text.strip())
+            TranscriptSegment(
+                start=seg.start,
+                end=seg.end,
+                text=seg.text.strip(),
+                words=[
+                    TranscriptWord(word=w.word.strip(), start=w.start, end=w.end)
+                    for w in (seg.words or [])
+                ],
+            )
             for seg in segments
         ]
         if logger:

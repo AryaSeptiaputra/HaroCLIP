@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from src.captioning.enums import CaptionStatus
+from src.captioning.service import run_captioning
 from src.highlights.enums import HighlightStatus
 from src.highlights.models import HighlightClip
 from src.highlights.service import run_highlight_detection
@@ -20,14 +22,15 @@ from src.utils.db import SessionLocal, init_db
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="One-shot end-to-end run: ingestion -> processing -> highlights -> reframe"
+        description="One-shot end-to-end run: ingestion -> processing -> highlights -> reframe -> captioning"
     )
     parser.add_argument("--url", help="Source video URL (submits a new ingestion job)")
     parser.add_argument(
         "--job-id",
         help="Resume from an existing ready ingestion job id instead of --url "
-        "(skips ingestion; processing/highlights/reframe are already idempotent, "
-        "so this safely resumes a partially-completed run without re-downloading)",
+        "(skips ingestion; processing/highlights/reframe/captioning are already "
+        "idempotent, so this safely resumes a partially-completed run without "
+        "re-downloading)",
     )
     parser.add_argument(
         "--force", action="store_true", help="Force re-run of every stage even if already ready"
@@ -42,7 +45,7 @@ def main() -> None:
     db = SessionLocal()
     try:
         if args.url:
-            print(f"[1/4] Ingestion: submitting {args.url}")
+            print(f"[1/5] Ingestion: submitting {args.url}")
             job = create_job(db, args.url)
             run_validation(job.id)
             db.refresh(job)
@@ -51,7 +54,7 @@ def main() -> None:
                 print(f"ingestion job id: {job.id}  (re-run with --job-id {job.id} once fixed)")
                 sys.exit(1)
             print(
-                f"[1/4] Ingestion OK: job_id={job.id} duration={job.duration_seconds}s "
+                f"[1/5] Ingestion OK: job_id={job.id} duration={job.duration_seconds}s "
                 f"{job.width}x{job.height}"
             )
         else:
@@ -62,17 +65,17 @@ def main() -> None:
             if job.status != JobStatus.READY:
                 print(f"ingestion job {job.id} is not ready (status={job.status.value})", file=sys.stderr)
                 sys.exit(1)
-            print(f"[1/4] Ingestion: resuming from existing job_id={job.id}")
+            print(f"[1/5] Ingestion: resuming from existing job_id={job.id}")
 
-        print("[2/4] Processing: downloading + extracting audio")
+        print("[2/5] Processing: downloading + extracting audio")
         proc = run_processing(db, job.id, force=args.force)
         if proc.status != ProcessingStatus.READY:
             print(f"FAILED at processing: [{proc.error_stage}] {proc.error_message}", file=sys.stderr)
             print(f"ingestion job id: {job.id}  (re-run with --job-id {job.id} once fixed)")
             sys.exit(1)
-        print(f"[2/4] Processing OK: video={proc.video_path} audio={proc.audio_path}")
+        print(f"[2/5] Processing OK: video={proc.video_path} audio={proc.audio_path}")
 
-        print("[3/4] Highlights: transcribing + detecting + rendering")
+        print("[3/5] Highlights: transcribing + detecting + rendering")
         hjob = run_highlight_detection(db, job.id, force=args.force)
         if hjob.status != HighlightStatus.READY:
             print(f"FAILED at highlights: [{hjob.error_stage}] {hjob.error_message}", file=sys.stderr)
@@ -84,24 +87,40 @@ def main() -> None:
             .order_by(HighlightClip.rank)
             .all()
         )
-        print(f"[3/4] Highlights OK: {len(clips)} clips")
+        print(f"[3/5] Highlights OK: {len(clips)} clips")
 
-        print("[4/4] Reframe: dynamic vertical-crop per clip")
+        print("[4/5] Reframe: dynamic vertical-crop per clip")
         any_failed = False
+        reframe_ready: dict[str, bool] = {}
         for clip in clips:
             rjob = run_reframe(db, clip.id, force=args.force)
+            reframe_ready[clip.id] = rjob.status == ReframeStatus.READY
             if rjob.status != ReframeStatus.READY:
                 any_failed = True
                 print(f"  clip #{clip.rank}: FAILED [{rjob.error_stage}] {rjob.error_message}", file=sys.stderr)
             else:
                 print(f"  clip #{clip.rank}: OK -> {rjob.output_path}")
 
+        print("[5/5] Captioning: burning word-burst captions per clip")
+        for clip in clips:
+            if not reframe_ready[clip.id]:
+                any_failed = True
+                print(f"  clip #{clip.rank}: SKIPPED (reframe not ready)", file=sys.stderr)
+                continue
+            cjob = run_captioning(db, clip.id, force=args.force)
+            if cjob.status != CaptionStatus.READY:
+                any_failed = True
+                print(f"  clip #{clip.rank}: FAILED [{cjob.error_stage}] {cjob.error_message}", file=sys.stderr)
+            else:
+                print(f"  clip #{clip.rank}: OK -> {cjob.output_path}")
+
         print()
         print(f"=== DONE. ingestion job id: {job.id} ===")
-        print(f"logs:        data/logs/{job.id}/")
-        print(f"final clips: data/reframed/")
+        print(f"logs:          data/logs/{job.id}/")
+        print(f"reframed clips: data/reframed/")
+        print(f"captioned clips (final deliverable): data/captioned/")
         if any_failed:
-            print("one or more reframe stages failed, see above", file=sys.stderr)
+            print("one or more stages failed, see above", file=sys.stderr)
             sys.exit(1)
     finally:
         db.close()

@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import time
 
@@ -74,9 +75,12 @@ def run_highlight_detection(
         transcript_text = " ".join(s.text for s in segments)
         logger.info("full transcript (%d chars):\n%s", len(transcript_text), transcript_text)
 
+        # dataclasses.asdict (not s.__dict__): recursively serializes each
+        # segment's nested `words` list, which .__dict__ would leave as raw
+        # TranscriptWord objects (not JSON-serializable).
         transcript_path = video_path.parent / "transcript.json"
         transcript_path.write_text(
-            json.dumps([s.__dict__ for s in segments]), encoding="utf-8"
+            json.dumps([dataclasses.asdict(s) for s in segments]), encoding="utf-8"
         )
         job.transcript_path = str(transcript_path.relative_to(DATA_DIR))
         db.commit()

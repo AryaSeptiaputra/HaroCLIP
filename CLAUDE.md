@@ -4,8 +4,9 @@
 
 HaroClip automatically generates video clips/highlights from a source video, aimed at
 creator/marketing use cases: submit a video link, it downloads the video, transcribes
-it, uses the Claude API to find "hook"-worthy highlight segments, and renders each as a
-dynamic vertical-crop clip that follows the speaker.
+it, uses the Claude API to find "hook"-worthy highlight segments, renders each as a
+dynamic vertical-crop clip that follows the speaker, and burns in auto-generated
+word-burst captions as the final step.
 
 ## Tech stack
 
@@ -16,7 +17,8 @@ dynamic vertical-crop clip that follows the speaker.
 - **Light-ASD** — active speaker detection (vendored from source, no PyPI package)
 - **YOLOv8-face** (ultralytics, **medium** variant) — face detection
 - **ByteTrack** — object/face tracking
-- **ffmpeg** — rendering/video processing
+- **ffmpeg** — rendering/video processing, plus caption burn-in via its `subtitles`
+  filter (libass) — no separate subtitle-rendering library
 - **FastAPI** — backend API layer (job orchestration)
 - Frontend: **React + Vite + TypeScript** — see `frontend/README.md`
 - Python 3.13, venv (not conda)
@@ -34,7 +36,9 @@ dynamic vertical-crop clip that follows the speaker.
 
 `main` carries four verified vertical slices, merged in from their module branches
 (`highlights-module`, `reframe-module`, and `remove-campaign-module` all merged
-2026-07-25):
+2026-07-25). A fifth, **Captioning**, was added 2026-07-26 on the still-unmerged
+`vast-ai-e2e-prep` branch (alongside that branch's Claude API switch — see "Next
+steps" for merge status):
 
 - **Ingestion** (`src/ingestion/`, `src/api/routers/ingestion.py`): `POST
   /ingestion/jobs` validates a submitted video link (direct file or platform link) via
@@ -99,11 +103,38 @@ dynamic vertical-crop clip that follows the speaker.
   modules' per-ingestion-job granularity (the CLI still takes `--job-id
   <ingestion_job_id>` for UX consistency and loops over that job's clips internally).
   **YOLOv8-face weights are a manual prerequisite** (not pip-installable):
-  `YOLOV8_FACE_WEIGHTS_PATH` env var, default `data/models/yolov8n-face-lindevs.pt` —
-  source: community repo `lindevs/yolov8-face` (WIDERFace-trained, MIT-licensed), must
-  be downloaded onto the vast.ai instance manually (or baked into the Docker image —
-  see `Dockerfile`), same category as the `ffmpeg` binary being a documented
-  prerequisite rather than a `requirements.txt` entry.
+  `YOLOV8_FACE_WEIGHTS_PATH` env var, default `data/models/yolov8m-face-lindevs.pt`
+  (**medium** variant, see the LLM-switch paragraph above for why) — source: community
+  repo `lindevs/yolov8-face` (WIDERFace-trained, MIT-licensed), must be downloaded onto
+  the vast.ai instance manually (or baked into the Docker image — see `Dockerfile`),
+  same category as the `ffmpeg` binary being a documented prerequisite rather than a
+  `requirements.txt` entry.
+- **Captioning** (`src/captioning/`): for every `HighlightClip` whose reframe is
+  `ready`, `python -m src.captioning.run --job-id <ingestion_job_id> [--force]` burns
+  short word-burst captions (2-4 words, ~TikTok style, not one-caption-per-sentence)
+  onto the finished reframed clip. Reuses data the pipeline already produces rather
+  than re-transcribing: `src/transcription/transcriber.py` now passes
+  `word_timestamps=True` to faster-whisper (same model/pass, no extra GPU cost) and
+  `TranscriptSegment` gained a `words: list[TranscriptWord]` field; the full transcript
+  (persisted as `transcript.json`, referenced via `HighlightJob.transcript_path`) is
+  reloaded and sliced+time-shifted to each clip's `[start_seconds, end_seconds]` window
+  (`src/captioning/subtitles.py::slice_words_to_clip`), then greedily grouped into
+  short cues (`build_burst_cues` — closes a cue at 4 words or 1.5s, whichever comes
+  first) and written as a plain hand-formatted `.srt` (`write_srt` — no subtitle
+  library dependency added). Burn-in is a **separate ffmpeg pass after** reframe's own
+  render, not folded into it: reframe's final remux is a pure stream-copy (`-c:v copy`)
+  for speed, but subtitle burn-in requires decoding, so captioning re-encodes
+  (`-vf "subtitles=...:force_style=..." -c:v libx264 -c:a copy`) from the already-final
+  reframed video into `data/captioned/<highlight_clip_id>.mp4` — the true final
+  deliverable. Tracked in `caption_jobs`, keyed by `highlight_clip_id` (same
+  one-job-per-clip convention as `reframe_jobs`), status
+  `pending→generating→rendering→ready`/`failed`. Wired into `src/pipeline/run.py` as
+  stage `[5/5]`, after the reframe loop; if a clip's reframe didn't reach `ready`,
+  captioning is skipped for that clip rather than raising (checked via the reframe
+  loop's per-clip result, not re-queried). No new pip dependency — relies on the
+  ffmpeg build having `libass`/the `subtitles` filter compiled in, standard in most
+  distro ffmpeg packages (flagged as a one-line gotcha-watch in `VAST_GUIDE.md` in case
+  a minimal vast.ai template's ffmpeg build lacks it).
 - Frontend (`frontend/`): React/Vite/TS app, currently just the ingestion view (no more
   tab shell — that was for switching to the now-removed campaign briefs module).
   **UI work is paused** (per user, 2026-07-25) until all backend modules are done —
@@ -232,6 +263,12 @@ video (the 57-min vast.ai test ran on the old local-LLM path, before this switch
 YOLOv8-face/ByteTrack/Light-ASD *accuracy* against real footage (vs. just "doesn't
 crash" against a synthetic video with zero real faces) — needs either a real
 face+speech test clip locally or another real vast.ai run with the current code.
+**Captioning is entirely unverified against real speech** too — local dev has no real
+face+speech test clip, so word-burst grouping/timing and the actual on-screen caption
+look have only been checked against hand-written fake transcripts, and the ffmpeg
+`subtitles` burn-in has only been confirmed to run (not necessarily produce
+good-looking output) locally; also needs a real vast.ai run to confirm the rented
+instance's ffmpeg build actually has `libass` compiled in.
 
 **Tooling notes (discovered this session, cost real debugging time — read before
 running anything ML-related locally):**
@@ -268,15 +305,19 @@ Planned across 5 phases (details TBD as implementation proceeds).
 `vast-ai-e2e-prep` branch)** — all four stages ran for real end-to-end, but it
 surfaced the context-window bug described above (highlight-detection LLM stage). Fixed
 by switching to the Claude API (2026-07-26) plus quality upgrades (whisper `float16`,
-YOLOv8-face `medium`) using the VRAM the local LLM no longer needs. **Not yet
-re-verified with these fixes** — that's next:
+YOLOv8-face `medium`) using the VRAM the local LLM no longer needs. **Captioning
+(also 2026-07-26) is new since that run and has never been exercised on vast.ai at
+all.** Neither is yet re-verified with a real run — that's next:
 
 1. Re-run the full pipeline end-to-end on vast.ai with the current code
    (`vast-ai-e2e-prep` branch, updated `VAST_GUIDE.md`): confirm the Claude API
    actually produces well-distributed, genuinely hook-worthy candidates across a full
    long video (not just the first minute); confirm whisper `float16`/YOLOv8-face
    `medium` fit comfortably in the RTX 3090 24GB budget alongside the freed-up
-   headroom; confirm real per-video Claude API cost against the ~$0.20-0.31 estimate.
+   headroom; confirm real per-video Claude API cost against the ~$0.20-0.31 estimate;
+   confirm the rented instance's ffmpeg has `libass`/`subtitles`-filter support and
+   that real word-burst caption timing/grouping actually looks good against real
+   speech, not just hand-written fake transcripts.
 2. Get a real short face+speech test clip (e.g. a webcam recording) to close the one
    remaining local-verification gap: actual YOLOv8-face/ByteTrack/Light-ASD behavior
    against real content, still only checked for "doesn't crash" against a synthetic
