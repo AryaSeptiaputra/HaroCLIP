@@ -158,6 +158,12 @@ not run to completion locally due to bandwidth. Kept for later, e.g. once a preb
 image is worth pushing to a registry for faster/more reproducible instance boots — not
 on the critical path for the first real test.
 
+`scripts/entrypoint.sh` (added 2026-07-27) automates the direct-install setup path as
+a vast.ai "On-start Script" — idempotent clone/pull, deps, the confirmed cuBLAS/hf-xet
+gotcha fixes, YOLOv8-face weight download, and pending DB migrations, all in one
+paste-in bash script that runs on every instance (re)start. See `VAST_GUIDE.md` for
+how to configure it.
+
 ## Next validation step
 
 **The first real vast.ai run already happened (2026-07-25)** — full pipeline

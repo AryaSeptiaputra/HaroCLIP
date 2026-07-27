@@ -26,6 +26,17 @@ remaining dependencies on top — avoids re-downloading a multi-GB CUDA base ima
 torch wheel inside the instance, and avoids depending on vast.ai's nested-Docker
 support (not guaranteed on every template).
 
+**Recommended: paste `scripts/entrypoint.sh` into vast.ai's "On-start Script" field**
+when configuring the instance/template. It automates everything in step 2 below
+(clone/pull the repo, install deps, the two confirmed gotcha fixes, download the
+YOLOv8-face weights, apply any pending DB migration) so that by the time you SSH in,
+you can go straight to step 3. It's idempotent — safe on first boot, a restart, or a
+stopped-then-started instance — and never contains a real secret value (it reads
+`ANTHROPIC_API_KEY`/`HF_TOKEN` from vast.ai's own "Environment Variables" field on the
+instance, set those there, not in the script). If you'd rather see each step happen
+live over SSH the first time, skip this and follow step 2 manually instead — both
+paths converge on the same result.
+
 ## 1. Rent the instance
 
 See `docs/hardware-spec.md` for the full breakdown. Short version:
@@ -61,6 +72,12 @@ See `docs/hardware-spec.md` for the full breakdown. Short version:
   same GPU model.
 
 ## 2. SSH in, verify the base template, install remaining deps
+
+**If you configured `scripts/entrypoint.sh` as the On-start Script, this entire
+section already ran automatically at boot** — check its output first
+(`cat /var/log/onstart.log` on most vast.ai templates, or whatever your template
+calls it) before repeating any of these steps manually. Everything below is both
+the manual fallback and the reference for exactly what that script automates.
 
 **First, before anything else**, confirm the template actually has a working
 CUDA-enabled torch — fail fast here rather than after a long setup:
