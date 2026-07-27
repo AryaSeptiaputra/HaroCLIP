@@ -9,7 +9,12 @@ from src.highlights.prompt import build_messages
 from src.transcription.schemas import TranscriptSegment
 
 LLM_MODEL_NAME = os.getenv("HIGHLIGHT_LLM_MODEL", "claude-sonnet-5")
-MAX_NEW_TOKENS = 2048
+# claude-sonnet-5 runs adaptive thinking by default when `thinking` is omitted, and
+# max_tokens is a hard cap on thinking + text output combined — 2048 was observed to
+# be entirely consumed by thinking on a real transcript, leaving zero text/JSON
+# output. 8192 leaves headroom for both on top of a full 5-10-candidate JSON array
+# (a few KB of text, well under 1k tokens).
+MAX_NEW_TOKENS = 8192
 MAX_CANDIDATES = 10
 MIN_CLIP_SECONDS = 30
 MAX_CLIP_SECONDS = 180
@@ -44,10 +49,18 @@ def generate_candidates(segments: list[TranscriptSegment], logger: logging.Logge
 
     if logger:
         logger.info(
-            "Claude API call done in %.1fs: input_tokens=%d output_tokens=%d",
+            "Claude API call done in %.1fs: input_tokens=%d output_tokens=%d stop_reason=%s",
             time.monotonic() - call_start, response.usage.input_tokens, response.usage.output_tokens,
+            response.stop_reason,
         )
         logger.info("raw LLM response:\n%s", raw_response)
+
+    if response.stop_reason == "max_tokens" and not raw_response.strip():
+        raise HighlightError(
+            "Claude response truncated at max_tokens before producing any text "
+            "output (likely all-thinking, no text blocks) — increase MAX_NEW_TOKENS",
+            stage="detection",
+        )
 
     return raw_response
 

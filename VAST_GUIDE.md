@@ -8,6 +8,17 @@ improvising.
 Branch to test: `vast-ai-e2e-prep` (not yet merged to `main` — merge only after this
 test succeeds, so any fixes needed land in the same branch).
 
+**Before renting: push your local branch.** `git clone`/`git checkout` on the
+instance pulls whatever is on **GitHub**, not whatever's on your dev machine. If you
+have local commits not yet pushed, the instance will run stale code — confirmed on a
+real run (2026-07-27): the instance hit `ModuleNotFoundError: No module named
+'transformers'` from a since-replaced code path, because 3 local commits (the
+Claude-API switch, captioning, and the local-model quality pass) hadn't been pushed
+yet. Fix: `git push origin vast-ai-e2e-prep` from your dev machine, confirm with
+`git status -sb` that it shows `[origin/vast-ai-e2e-prep]` with no `ahead`/`behind`
+count, *then* rent/clone. This costs nothing to check and can waste real credit if
+skipped (diagnosing an error that was already fixed locally).
+
 **Setup approach: install directly on the instance, no Docker.** A `Dockerfile` exists
 in the repo for later reproducibility, but for this first real run it's simpler and
 faster to pick a vast.ai template that already has PyTorch+CUDA installed and add our
@@ -157,6 +168,23 @@ python3 -m src.pipeline.run --job-id <uuid>
 
 Every stage is idempotent (short-circuits if already `ready` unless you also pass
 `--force`), so this safely resumes from wherever it actually stopped.
+
+**If the fix required a `git pull` mid-session** (e.g. you hit the stale-code gotcha
+above, or any other code fix landed after you started), do these before re-running,
+not just `git pull` alone:
+
+```bash
+git pull
+pip install -r requirements.txt   # picks up any new/changed dependency (e.g. anthropic)
+```
+
+Also re-check anything that might have changed between commits:
+- Env vars — re-`export` `ANTHROPIC_API_KEY`/`HF_TOKEN`/`LD_LIBRARY_PATH` if your SSH
+  session dropped and reconnected (they don't persist across sessions, see step 2).
+- Model weight filenames — if a code change bumped a default model variant (e.g.
+  YOLOv8-face `medium`→`xlarge`), the old weight file won't match
+  `YOLOV8_FACE_WEIGHTS_PATH`'s new default; re-run the relevant `curl` command from
+  step 2 to fetch the new one rather than assuming what's already on disk is current.
 
 ## 4. Collect results before destroying the instance
 
