@@ -88,7 +88,22 @@ def run_highlight_detection(
         job.status = HighlightStatus.DETECTING
         db.commit()
 
-        raw_response = generate_candidates(segments, logger=logger)
+        # Reuse a previously-cached Claude response when resuming after a
+        # later-stage failure (parsing/rendering) so we don't re-spend paid API
+        # credit for a call that already succeeded. --force always calls fresh.
+        llm_response_path = video_path.parent / "llm_response.txt"
+        if not force and job.llm_response_path and (DATA_DIR / job.llm_response_path).exists():
+            raw_response = (DATA_DIR / job.llm_response_path).read_text(encoding="utf-8")
+            logger.info(
+                "using cached Claude response from %s — skipping API call (saves credit)",
+                job.llm_response_path,
+            )
+        else:
+            raw_response = generate_candidates(segments, logger=logger)
+            llm_response_path.write_text(raw_response, encoding="utf-8")
+            job.llm_response_path = str(llm_response_path.relative_to(DATA_DIR))
+            db.commit()
+
         candidates = parse_candidates(raw_response, video_duration, logger=logger)
 
         db.query(HighlightClip).filter_by(highlight_job_id=job.id).delete()

@@ -68,6 +68,17 @@ steps" for merge status):
   Tracked in `highlight_jobs`/`highlight_clips`, same loose string-reference convention
   as `processing_jobs`.
 
+  **Claude's raw response is cached to disk** (`HighlightJob.llm_response_path`,
+  written the moment the API call succeeds, same sibling-file pattern as
+  `transcript_path`) **so a resume after a later-stage failure (parsing/rendering)
+  reuses it instead of re-calling the paid API** — added 2026-07-27 after two
+  live-run incidents already burned real credit re-diagnosing/re-running.
+  `--force` always bypasses the cache for a deliberate fresh call. Existing
+  `data/haroclip.db` files created before this change need a one-time manual
+  `ALTER TABLE highlight_jobs ADD COLUMN llm_response_path VARCHAR;` — this project
+  has no migration system (`init_db()` is a bare `Base.metadata.create_all()`,
+  which never adds columns to an existing table), see `VAST_GUIDE.md`.
+
   **LLM choice switched from local (Qwen2.5-7B) to the Claude API on 2026-07-26**,
   after the first real vast.ai run (57-min video) exposed a real bug: all 10 returned
   candidates clustered in the first 89 seconds, in mechanical back-to-back 5s chunks —

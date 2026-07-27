@@ -185,6 +185,19 @@ Also re-check anything that might have changed between commits:
   YOLOv8-face `medium`→`xlarge`), the old weight file won't match
   `YOLOV8_FACE_WEIGHTS_PATH`'s new default; re-run the relevant `curl` command from
   step 2 to fetch the new one rather than assuming what's already on disk is current.
+- **DB schema changes — required, not optional, or the run will error.** This
+  project has no migration system (`init_db()` is a bare
+  `Base.metadata.create_all()`, which only creates missing tables, never adds
+  columns to an existing one). If a pulled fix added a column to an existing
+  SQLAlchemy model (check the commit/changelog), apply it manually against your
+  **existing** `data/haroclip.db` before resuming, e.g. for the `llm_response_path`
+  caching column added to `highlight_jobs`:
+  ```bash
+  sqlite3 data/haroclip.db "ALTER TABLE highlight_jobs ADD COLUMN llm_response_path VARCHAR;"
+  ```
+  Skipping this makes the next write to that column fail with a `no such column`
+  SQLite error — a fresh DB (no prior runs on this instance) needs nothing extra,
+  `create_all` includes new columns from the start.
 
 ## 4. Collect results before destroying the instance
 

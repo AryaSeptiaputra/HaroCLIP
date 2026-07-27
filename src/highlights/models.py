@@ -25,6 +25,10 @@ class HighlightJob(Base):
         default=HighlightStatus.PENDING,
     )
     transcript_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Raw Claude API response, cached to disk the moment a call succeeds — lets a
+    # resume after a later-stage failure (parsing/rendering) reuse it instead of
+    # re-calling the paid API. See src/highlights/service.py.
+    llm_response_path: Mapped[str | None] = mapped_column(String, nullable=True)
     error_stage: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
