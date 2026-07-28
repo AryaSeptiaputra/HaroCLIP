@@ -30,6 +30,13 @@ class IngestionJob(Base):
     title: Mapped[str | None] = mapped_column(String, nullable=True)
     raw_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # Freeform descriptive prompt steering highlight selection toward a campaign's
+    # intent (e.g. "prioritize moments about pricing and objection-handling").
+    # The user converts their campaign brief into this text manually, outside the
+    # system — no brief upload/parsing here, unlike the removed campaign module.
+    # Set at job creation, persists across --job-id resumes. See src/highlights/prompt.py.
+    campaign_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     error_stage: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 

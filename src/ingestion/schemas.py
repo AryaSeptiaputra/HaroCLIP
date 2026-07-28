@@ -7,6 +7,7 @@ from src.ingestion.enums import JobStatus, LinkType
 
 class IngestionJobCreate(BaseModel):
     source_url: HttpUrl
+    campaign_context: str | None = None
 
 
 class IngestionJobRead(BaseModel):
@@ -22,6 +23,7 @@ class IngestionJobRead(BaseModel):
     video_codec: str | None
     audio_codec: str | None
     title: str | None
+    campaign_context: str | None
     error_stage: str | None
     error_message: str | None
     created_at: datetime

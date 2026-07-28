@@ -47,10 +47,31 @@ def format_transcript(segments: list[TranscriptSegment]) -> str:
     return "\n".join(lines)
 
 
-def build_messages(segments: list[TranscriptSegment]) -> list[dict[str, str]]:
+def build_system_prompt(campaign_context: str | None = None) -> str:
+    """Layers an optional campaign brief on top of the base hook-detection prompt
+    as an ADDITIONAL filter, not a replacement — a clip still has to be a genuine
+    hook first. The user writes/converts their own campaign brief into this
+    descriptive text outside the system; this function only weaves it in.
+    """
+    if not campaign_context or not campaign_context.strip():
+        return SYSTEM_PROMPT
+    return (
+        f"{SYSTEM_PROMPT}\n\n"
+        "Campaign context — use this as an ADDITIONAL filter layered on top of the "
+        "hook rules above, not a replacement for them. Prefer candidates that are "
+        "both a genuine hook AND relevant to this campaign. Do not select a clip "
+        "solely for campaign relevance if it has no real hook, and do not ignore a "
+        "strong hook just because it's unrelated to the campaign — weigh both.\n\n"
+        f"{campaign_context.strip()}"
+    )
+
+
+def build_messages(
+    segments: list[TranscriptSegment], campaign_context: str | None = None
+) -> list[dict[str, str]]:
     transcript_text = format_transcript(segments)
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": build_system_prompt(campaign_context)},
         {
             "role": "user",
             "content": f"Transcript:\n{transcript_text}\n\nReturn the JSON array now.",

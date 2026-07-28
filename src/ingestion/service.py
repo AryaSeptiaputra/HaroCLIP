@@ -13,19 +13,26 @@ from src.utils.db import SessionLocal
 from src.utils.logging import get_job_logger
 
 
-def create_job(db: Session, source_url: str) -> IngestionJob:
+def create_job(
+    db: Session, source_url: str, campaign_context: str | None = None
+) -> IngestionJob:
     link_type = detect_link_type(source_url)
     job = IngestionJob(
         source_url=source_url,
         link_type=link_type,
         status=JobStatus.VALIDATING,
+        campaign_context=campaign_context,
     )
     db.add(job)
     db.commit()
     db.refresh(job)
 
     logger = get_job_logger("ingestion", job.id)
-    logger.info("created job %s: source_url=%s link_type=%s", job.id, source_url, link_type.value)
+    logger.info(
+        "created job %s: source_url=%s link_type=%s campaign_context=%s",
+        job.id, source_url, link_type.value,
+        f"{len(campaign_context)} chars" if campaign_context else "none",
+    )
     return job
 
 

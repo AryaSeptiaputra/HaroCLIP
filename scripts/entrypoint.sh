@@ -14,7 +14,7 @@
 
 set -uo pipefail
 
-REPO_URL="https://github.com/AryaSeptiaputra/HaroCLIP.git"
+REPO_URL="https://github.com/AryaSeptiaputra/HaroCLIP.git"      
 REPO_DIR="$HOME/HaroCLIP"
 BRANCH="vast-ai-e2e-prep"
 
@@ -89,6 +89,13 @@ if [ -f data/haroclip.db ]; then
         if [ "${HAS_COLUMN:-0}" -eq 0 ]; then
             echo "[entrypoint] migrating db: adding highlight_jobs.llm_response_path..."
             sqlite3 data/haroclip.db "ALTER TABLE highlight_jobs ADD COLUMN llm_response_path VARCHAR;"
+        fi
+    fi
+    if sqlite3 data/haroclip.db "SELECT name FROM sqlite_master WHERE type='table' AND name='ingestion_jobs';" 2>/dev/null | grep -q ingestion_jobs; then
+        HAS_CAMPAIGN_COLUMN=$(sqlite3 data/haroclip.db "PRAGMA table_info(ingestion_jobs);" 2>/dev/null | grep -c "campaign_context" || true)
+        if [ "${HAS_CAMPAIGN_COLUMN:-0}" -eq 0 ]; then
+            echo "[entrypoint] migrating db: adding ingestion_jobs.campaign_context..."
+            sqlite3 data/haroclip.db "ALTER TABLE ingestion_jobs ADD COLUMN campaign_context TEXT;"
         fi
     fi
 fi

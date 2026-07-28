@@ -22,10 +22,14 @@ MAX_CLIP_SECONDS = 180
 JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 
-def generate_candidates(segments: list[TranscriptSegment], logger: logging.Logger | None = None) -> str:
+def generate_candidates(
+    segments: list[TranscriptSegment],
+    campaign_context: str | None = None,
+    logger: logging.Logger | None = None,
+) -> str:
     import anthropic
 
-    messages = build_messages(segments)
+    messages = build_messages(segments, campaign_context)
     system_prompt = next(m["content"] for m in messages if m["role"] == "system")
     user_messages = [m for m in messages if m["role"] != "system"]
 
@@ -33,8 +37,9 @@ def generate_candidates(segments: list[TranscriptSegment], logger: logging.Logge
         transcript_chars = sum(len(m["content"]) for m in user_messages)
         logger.info(
             "calling Claude API model=%s (transcript ~%d chars, no chunking needed — "
-            "well within context window)",
+            "well within context window)%s",
             LLM_MODEL_NAME, transcript_chars,
+            f" [campaign context: {len(campaign_context)} chars]" if campaign_context else "",
         )
 
     client = anthropic.Anthropic()

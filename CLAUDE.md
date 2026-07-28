@@ -44,7 +44,10 @@ steps" for merge status):
   /ingestion/jobs` validates a submitted video link (direct file or platform link) via
   ffprobe/yt-dlp — no download at this stage, that's deferred to the processing stage —
   and persists status in SQLite (`pending`/`validating`/`ready`/`failed`). `GET
-  /ingestion/jobs/{id}` polls for status.
+  /ingestion/jobs/{id}` polls for status. `IngestionJob.campaign_context` (added
+  2026-07-29, optional) holds a freeform descriptive prompt that steers highlight
+  selection toward a campaign's intent — see the "Highlight detection" bullet below
+  and "Campaign context returns as a prompt" further down for the full story.
 - **Download & pre-processing** (`src/processing/`): given a `ready` `IngestionJob`,
   `python -m src.processing.run --job-id <id> [--force]` downloads the full video
   (re-resolving fresh via yt-dlp for platform links, or streaming a direct URL via
@@ -60,7 +63,11 @@ steps" for merge status):
   with hand-designed "hook" principles (`src/highlights/prompt.py` — curiosity gap,
   surprising claim, emotional peak, concrete insight, controversial opinion; clips
   **30s-3min**, spread across the *entire* video rather than clustered in one section,
-  natural sentence boundaries, self-contained) to get 5-10 ranked candidate segments as
+  natural sentence boundaries, self-contained), **optionally layered with
+  `IngestionJob.campaign_context`** (`build_system_prompt()` — an additional filter
+  appended to the base system prompt, not a replacement: still has to be a genuine
+  hook first, campaign relevance breaks ties rather than overriding the hook bar) to
+  get 5-10 ranked candidate segments as
   strict JSON (`parse_candidates` validates timestamps/duration, drops malformed
   entries rather than failing the whole job), then renders each as a static clip via
   ffmpeg (`src/rendering/clipper.py` — plain temporal cut, `-ss`/`-t` as *input* options
@@ -216,8 +223,24 @@ not to pursue this direction — removed from `main` (`src/campaign/`,
 `src/api/routers/campaign.py`, the campaign frontend view/components/hook, and the
 `requests`/`python-multipart` dependencies that existed only for it) rather than left
 half-built. The `campaign-module` branch itself is kept on GitHub as archived history,
-not deleted. If Whop integration or campaign-brief-driven highlight targeting comes
-back later, treat it as a fresh module, not a resurrection of this code.
+not deleted.
+
+**Campaign context returns as a prompt, not a module (2026-07-29).** Rather than
+resurrecting brief upload/parsing, `IngestionJob` gained a single optional
+`campaign_context` text field: a freeform descriptive prompt the user writes/converts
+from their own campaign brief **manually, outside the system** — no upload, no
+PDF/DOCX parsing, no structured extraction. Set via `--campaign-context "<text>"` or
+`--campaign-file <path>` on `python -m src.pipeline.run` (mutually exclusive), or the
+`campaign_context` field on `POST /ingestion/jobs`; persists on the job so a
+`--job-id` resume doesn't need it repeated. `src/highlights/prompt.py::
+build_system_prompt()` layers it onto the base hook-detection system prompt as an
+**additional filter, not a replacement** — the model is instructed to still require a
+genuine hook first, with campaign relevance breaking ties rather than overriding the
+hook bar. This is a much smaller surface than the removed module: no new package, no
+new router, no frontend, one nullable column plus a prompt-building change. If a
+fuller brief-upload/structured-extraction flow (or Whop integration) comes back
+later, treat it as a fresh module built on top of this, not a resurrection of the
+removed `src/campaign/` code.
 
 **Real Light-ASD is vendored** (`src/detection/light_asd/`, MIT-licensed, upstream
 `github.com/Junhua-Liao/Light-ASD`, attribution + deviations documented in

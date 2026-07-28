@@ -1,5 +1,6 @@
 import argparse
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -35,18 +36,38 @@ def main() -> None:
     parser.add_argument(
         "--force", action="store_true", help="Force re-run of every stage even if already ready"
     )
+    parser.add_argument(
+        "--campaign-context",
+        help="Inline campaign brief/prompt text to steer highlight selection "
+        "(additional filter layered on top of the hook-detection rules, not a "
+        "replacement for them). Convert your campaign brief into this descriptive "
+        "text yourself — mutually exclusive with --campaign-file.",
+    )
+    parser.add_argument(
+        "--campaign-file",
+        help="Path to a text file containing the campaign brief/prompt — use this "
+        "instead of --campaign-context for a longer brief. Mutually exclusive with "
+        "--campaign-context.",
+    )
     args = parser.parse_args()
 
     if bool(args.url) == bool(args.job_id):
         print("exactly one of --url or --job-id is required", file=sys.stderr)
         sys.exit(1)
+    if args.campaign_context and args.campaign_file:
+        print("only one of --campaign-context or --campaign-file may be given", file=sys.stderr)
+        sys.exit(1)
+
+    campaign_context = args.campaign_context
+    if args.campaign_file:
+        campaign_context = Path(args.campaign_file).read_text(encoding="utf-8").strip()
 
     init_db()
     db = SessionLocal()
     try:
         if args.url:
             print(f"[1/5] Ingestion: submitting {args.url}")
-            job = create_job(db, args.url)
+            job = create_job(db, args.url, campaign_context=campaign_context)
             run_validation(job.id)
             db.refresh(job)
             if job.status != JobStatus.READY:
@@ -65,7 +86,12 @@ def main() -> None:
             if job.status != JobStatus.READY:
                 print(f"ingestion job {job.id} is not ready (status={job.status.value})", file=sys.stderr)
                 sys.exit(1)
-            print(f"[1/5] Ingestion: resuming from existing job_id={job.id}")
+            if campaign_context is not None:
+                job.campaign_context = campaign_context
+                db.commit()
+                print(f"[1/5] Ingestion: resuming from existing job_id={job.id} (campaign context updated)")
+            else:
+                print(f"[1/5] Ingestion: resuming from existing job_id={job.id}")
 
         print("[2/5] Processing: downloading + extracting audio")
         proc = run_processing(db, job.id, force=args.force)

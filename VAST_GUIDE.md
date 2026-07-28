@@ -161,6 +161,14 @@ connection drops and you reconnect, run them again before resuming with `--job-i
 python3 -m src.pipeline.run --url "https://youtu.be/q44ozTxnU8A?si=wR5jQi7c9vxFSWQG"
 ```
 
+**Optional: steer highlight selection toward a campaign.** Add `--campaign-context
+"<text>"` for a short inline brief, or `--campaign-file path/to/brief.txt` for a
+longer one (mutually exclusive). This is layered on top of the hook-detection rules
+as an additional filter, not a replacement — write the descriptive prompt yourself
+(convert your campaign brief into it manually, nothing is parsed/uploaded here). It
+persists on the ingestion job, so a `--job-id` resume doesn't need it repeated
+unless you want to change it.
+
 This chains all five stages (ingestion → processing → highlights → reframe →
 captioning) automatically, printing a `[1/5]`...`[5/5]` progress summary and, on
 success, the ingestion job id plus where results landed:
@@ -209,12 +217,14 @@ Also re-check anything that might have changed between commits:
 - **DB schema changes — required, not optional, or the run will error.** This
   project has no migration system (`init_db()` is a bare
   `Base.metadata.create_all()`, which only creates missing tables, never adds
-  columns to an existing one). If a pulled fix added a column to an existing
-  SQLAlchemy model (check the commit/changelog), apply it manually against your
-  **existing** `data/haroclip.db` before resuming, e.g. for the `llm_response_path`
-  caching column added to `highlight_jobs`:
+  columns to an existing one). `scripts/entrypoint.sh` now applies the known
+  migrations automatically and idempotently on every boot, so if you're using it
+  as your On-start Script, a restart handles this for you. If you're setting up
+  manually instead, apply any pending migration by hand against your **existing**
+  `data/haroclip.db` before resuming — e.g. the two added so far:
   ```bash
   sqlite3 data/haroclip.db "ALTER TABLE highlight_jobs ADD COLUMN llm_response_path VARCHAR;"
+  sqlite3 data/haroclip.db "ALTER TABLE ingestion_jobs ADD COLUMN campaign_context TEXT;"
   ```
   Skipping this makes the next write to that column fail with a `no such column`
   SQLite error — a fresh DB (no prior runs on this instance) needs nothing extra,

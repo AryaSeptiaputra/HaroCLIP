@@ -99,7 +99,9 @@ def run_highlight_detection(
                 job.llm_response_path,
             )
         else:
-            raw_response = generate_candidates(segments, logger=logger)
+            raw_response = generate_candidates(
+                segments, campaign_context=ingestion_job.campaign_context, logger=logger
+            )
             llm_response_path.write_text(raw_response, encoding="utf-8")
             job.llm_response_path = str(llm_response_path.relative_to(DATA_DIR))
             db.commit()
