@@ -102,7 +102,12 @@ API switch.
     moved to the Claude API on 2026-07-26 — this removes what was previously the
     single largest download (Qwen2.5-7B-Instruct, several GB) from the
     storage/bootstrap-time budget entirely.
-  - Output clips: tens–hundreds of MB each
+  - Output clips: tens–hundreds of MB each. Captioned outputs (`data/captioned/`)
+    run somewhat larger than the pre-caption reframed clips — captioning's ffmpeg
+    pass uses `-crf 18` (2026-07-28, for legible burned-in text; default CRF 23
+    under-serves compact high-contrast glyphs), which trades some file size for
+    sharpness. Still small in absolute terms for 30s-3min clips, not worth a
+    precise figure here.
 
 Filter vast.ai listings by GPU **and** vCPU/RAM together — host specs vary between
 listings with the same GPU model.

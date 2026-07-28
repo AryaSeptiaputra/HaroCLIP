@@ -17,6 +17,7 @@ from src.captioning.subtitles import (
 from src.highlights.models import HighlightClip, HighlightJob
 from src.reframe.enums import ReframeStatus
 from src.reframe.models import ReframeJob
+from src.reframe.renderer import OUTPUT_HEIGHT, OUTPUT_WIDTH
 from src.utils.db import DATA_DIR
 from src.utils.logging import get_job_logger
 
@@ -24,9 +25,16 @@ FFMPEG_TIMEOUT_SECONDS = 120
 # Bottom-center burst captions: white text, black outline, no background box —
 # standard short-form-video look. Relies on the ffmpeg build having libass (the
 # `subtitles` filter) compiled in — see docs/hardware-spec.md / VAST_GUIDE.md.
+# FontSize=36 (not the original 14, far too small on a 1080-wide vertical frame —
+# but 72 was tried first and, verified visually against real footage, was FAR too
+# large, covering nearly half the frame; 36 is a real, image-verified middle
+# ground, not a formula-derived guess). FontName names the bold weight directly
+# (sidesteps ASS Bold-flag parsing ambiguity) — real font must be installed
+# system-side, see Dockerfile/VAST_GUIDE.md/scripts/entrypoint.sh
+# (fonts-dejavu-core). Outline bumped modestly to match the larger font.
 SUBTITLE_STYLE = (
-    "FontSize=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-    "BorderStyle=1,Outline=2,Alignment=2"
+    "FontName=DejaVu Sans Bold,FontSize=36,PrimaryColour=&H00FFFFFF,"
+    "OutlineColour=&H00000000,BorderStyle=1,Outline=3,Alignment=2"
 )
 
 
@@ -117,8 +125,15 @@ def run_captioning(db: Session, highlight_clip_id: str, force: bool = False) -> 
                     "ffmpeg", "-y",
                     "-i", str(reframed_path),
                     "-vf",
-                    f"subtitles='{_escape_subtitles_path(srt_path)}':force_style='{SUBTITLE_STYLE}'",
+                    f"subtitles='{_escape_subtitles_path(srt_path)}'"
+                    f":original_size={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}"
+                    f":force_style='{SUBTITLE_STYLE}'",
                     "-c:v", "libx264",
+                    # crf 18 (not left at ffmpeg's default 23): this is the final
+                    # deliverable pass and the one ffmpeg call in the project that
+                    # burns compact high-contrast text glyphs, which show default
+                    # compression artifacts more than general video content does.
+                    "-crf", "18",
                     "-c:a", "copy",
                     str(out_path),
                 ],

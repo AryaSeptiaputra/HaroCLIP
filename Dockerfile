@@ -13,7 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends \
         python3.13 python3.13-venv python3.13-dev \
         ffmpeg git build-essential curl ca-certificates \
+        fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
+# fonts-dejavu-core: real font for src/captioning/service.py's SUBTITLE_STYLE
+# (FontName=DejaVu Sans Bold) — without it libass falls back to whatever
+# fontconfig finds by default, uncontrolled and likely low-quality.
 
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 1 \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.13

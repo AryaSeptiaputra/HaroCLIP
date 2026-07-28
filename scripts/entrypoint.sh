@@ -39,6 +39,13 @@ if ! command -v ffmpeg &> /dev/null; then
     echo "[entrypoint] installing ffmpeg..."
     apt-get update && apt-get install -y ffmpeg
 fi
+# Real bold font for captioning's burned-in text (SUBTITLE_STYLE names
+# "DejaVu Sans Bold" directly) — without it libass falls back to an
+# uncontrolled default font.
+if ! fc-list 2>/dev/null | grep -qi "DejaVu Sans"; then
+    echo "[entrypoint] installing fonts-dejavu-core..."
+    apt-get update && apt-get install -y fonts-dejavu-core
+fi
 if ! command -v sqlite3 &> /dev/null; then
     echo "[entrypoint] installing sqlite3 CLI..."
     apt-get update && apt-get install -y sqlite3

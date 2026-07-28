@@ -148,6 +148,25 @@ steps" for merge status):
   ffmpeg build having `libass`/the `subtitles` filter compiled in, standard in most
   distro ffmpeg packages (flagged as a one-line gotcha-watch in `VAST_GUIDE.md` in case
   a minimal vast.ai template's ffmpeg build lacks it).
+
+  **Caption font quality fixed (2026-07-28), based on real user feedback from the
+  first real captioning run** (timing confirmed correct, font quality was the one
+  complaint): `SUBTITLE_STYLE`'s `FontSize` was `14` — tiny on a 1080×1920 output,
+  the actual dominant cause, not an encoding artifact. First tried `72`
+  (formula-derived guess) but a real local re-render against actual footage showed
+  it was *far* too large, covering nearly half the frame — corrected to `36` after
+  visually comparing several sizes against real footage, a genuinely
+  image-verified value rather than a calculation. Also added
+  `FontName=DejaVu Sans Bold` (names the bold weight directly, sidesteps ASS
+  `Bold`-flag parsing ambiguity) and bumped `Outline` `2`→`3` to match.
+  **`fonts-dejavu-core` is now a required system prerequisite** (`Dockerfile`,
+  `VAST_GUIDE.md`, `scripts/entrypoint.sh`) — without it, libass falls back to
+  whatever fontconfig finds by default, uncontrolled. Also added
+  `original_size=1080x1920` to the `subtitles` filter (explicit libass scaling
+  context instead of relying on undocumented auto-detection) and `-crf 18` to the
+  libx264 re-encode (default CRF 23 under-serves compact high-contrast text
+  glyphs; this is the one ffmpeg call in the project that gets an explicit CRF,
+  since it's the final deliverable pass — no other call has this convention).
 - Frontend (`frontend/`): React/Vite/TS app, currently just the ingestion view (no more
   tab shell — that was for switching to the now-removed campaign briefs module).
   **UI work is paused** (per user, 2026-07-25) until all backend modules are done —
