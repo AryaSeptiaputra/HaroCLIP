@@ -167,7 +167,11 @@ longer one (mutually exclusive). This is layered on top of the hook-detection ru
 as an additional filter, not a replacement — write the descriptive prompt yourself
 (convert your campaign brief into it manually, nothing is parsed/uploaded here). It
 persists on the ingestion job, so a `--job-id` resume doesn't need it repeated
-unless you want to change it.
+unless you want to change it. **If your brief contains double quotes (brand names in
+quotes, quoted phrases, etc.) or is more than a line or two, use `--campaign-file`
+with a heredoc, not inline `--campaign-context "..."`** — confirmed on a real run
+that embedded `"` characters break bash's argument parsing well before Python ever
+sees it. See "Known gotchas" below for the exact fix.
 
 This chains all five stages (ingestion → processing → highlights → reframe →
 captioning) automatically, printing a `[1/5]`...`[5/5]` progress summary and, on
@@ -296,6 +300,25 @@ reference/in case they resurface):
   (step 2). If it recurs even with that set, `pip uninstall -y hf-xet` to remove it
   entirely. This was hit downloading the old local Qwen2.5-7B checkpoint, but the same
   `hf-xet` path is still used for whisper's checkpoint, so the fix stays relevant.
+- **`run.py: error: unrecognized arguments: ...` from `--campaign-context`** — a shell
+  quoting issue, not a bug in the script. If your campaign brief contains double
+  quotes (e.g. `kata "BOXABL"`), wrapping the whole `--campaign-context` value in
+  double quotes breaks: bash closes the argument at the *first* embedded `"`, and
+  every bare word after that becomes its own unrecognized argument. Two fixes:
+  - **Preferred for any brief with quotes or that's more than a line or two**: use
+    `--campaign-file` instead, writing the brief with a quoted heredoc so bash does
+    zero interpretation of its contents:
+    ```bash
+    cat > campaign_brief.txt << 'EOF'
+    Your brief here, with "quotes", (parentheses), and anything else — verbatim.
+    EOF
+    python3 -m src.pipeline.run --url "..." --campaign-file campaign_brief.txt
+    ```
+    (The `'EOF'` delimiter — quoted — is what disables interpretation; a bare `EOF`
+    would still expand `$variables` and backticks inside the heredoc.)
+  - **Quick fix for a short inline brief**: wrap `--campaign-context` in **single**
+    quotes instead of double quotes (works as long as the brief itself contains no
+    single quotes/apostrophes): `--campaign-context 'kata "BOXABL", "Casita"'`.
 
 Not yet confirmed either way on vast.ai (worked locally, but that's a different ffmpeg
 build):
