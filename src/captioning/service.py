@@ -21,7 +21,11 @@ from src.reframe.renderer import OUTPUT_HEIGHT, OUTPUT_WIDTH
 from src.utils.db import DATA_DIR
 from src.utils.logging import get_job_logger
 
-FFMPEG_TIMEOUT_SECONDS = 120
+# 600 (not 120): same reasoning as src/rendering/clipper.py — this is also a
+# CPU-bound libx264 re-encode (plus -crf 18, slower than default), confirmed to
+# risk exceeding 120s on a high-resolution source. reframe/renderer.py's ffmpeg
+# call doesn't need this — it's a pure stream-copy remux, not a re-encode.
+FFMPEG_TIMEOUT_SECONDS = 600
 # Bottom-center burst captions: white text, black outline, no background box —
 # standard short-form-video look. Relies on the ffmpeg build having libass (the
 # `subtitles` filter) compiled in — see docs/hardware-spec.md / VAST_GUIDE.md.

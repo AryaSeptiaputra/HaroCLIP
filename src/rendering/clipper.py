@@ -3,7 +3,12 @@ from pathlib import Path
 
 from src.rendering.exceptions import RenderingError
 
-FFMPEG_TIMEOUT_SECONDS = 120
+# 600 (not 120): confirmed on a real run that a CPU-bound libx264 re-encode of a
+# high-resolution source clip can exceed 120s even for a well-under-MAX_CLIP_SECONDS
+# duration. Generous margin for up to a full 180s (MAX_CLIP_SECONDS) clip even at a
+# pessimistic below-realtime encode rate. See src/processing/downloader.py for the
+# companion fix (capping download resolution) that reduces how often this matters.
+FFMPEG_TIMEOUT_SECONDS = 600
 
 
 def render_clip(source_video: Path, start: float, end: float, out_path: Path) -> None:

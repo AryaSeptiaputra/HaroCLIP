@@ -18,7 +18,13 @@ def download_platform_video(url: str, dest_dir: Path) -> Path:
         "no_warnings": True,
         "noprogress": True,
         "noplaylist": True,
-        "format": "bestvideo+bestaudio/best",
+        # Capped at 1080p (not "bestvideo", uncapped): the final deliverable is
+        # always cropped down to a 1080-wide 9:16 vertical clip
+        # (src/reframe/renderer.py), so downloading source resolution above 1080p
+        # wastes disk, bandwidth, and CPU-bound re-encode time for zero quality
+        # benefit. Confirmed on a real run: an uncapped download contributed to
+        # both a disk-full failure and an ffmpeg render timeout downstream.
+        "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
         "merge_output_format": "mp4",
         "outtmpl": outtmpl,
     }
