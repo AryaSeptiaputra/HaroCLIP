@@ -1009,6 +1009,125 @@ Claude's actual candidate-count judgment in practice tracks real content richnes
 same caveat category as the rest of highlight-detection quality (see the "Next
 steps" verification list below, which should be read as covering this too).
 
+**Reframe crop-center-drifts-between-two-people bug fixed with a two-layer,
+track-continuity-aware selection/interpolation fix (2026-08-01), per user
+report.** User observed: when two people are close together in a frame, the
+dynamic-crop camera's center ends up between the two people instead of locked
+onto one. Root cause traced by code inspection (not yet confirmed against
+real two-person footage): neither `src/reframe/crop_path.py` nor
+`src/reframe/speaker_selection.py` ever explicitly averages two people's
+positions — `build_crop_path()` always operated on a single, already-filtered
+`track_id`'s boxes. The actual mechanism is an **undetected ByteTrack ID
+switch** (`src/tracking/face_tracker.py`, `sv.ByteTrack()` default config,
+untouched by this fix): when two faces are close/overlapping, the same
+`track_id` can silently start referring to a different physical person
+mid-clip. `select_primary_track_with_asd()` picked one `track_id` for the
+whole clip based on a mean ASD score across all its samples, unaware the
+identity underneath had switched; `build_crop_path()`'s `np.interp()` then
+linearly interpolated straight from person A's last sample to person B's
+first sample across the switch point, and the existing 15-frame moving
+average further blended x-values straddling it — producing a crop center
+that visibly sits between the two people for several frames.
+
+Fix, per explicit user-selected direction (a combined two-layer approach, not
+ByteTrack tuning):
+- **New shared module `src/reframe/track_continuity.py`**: `find_discontinuities()`
+  computes frame-to-frame horizontal velocity (px/sec, normalized by
+  `frame_index` delta ÷ fps rather than a raw per-sample pixel delta, so the
+  threshold means the same thing regardless of clip fps or sampling gaps) and
+  flags any jump above `MAX_JUMP_PX_PER_SEC = 1800.0` — an **untuned
+  heuristic default**, no real two-person footage exists locally to calibrate
+  against. `split_into_segments()` splits a sorted sample list at each
+  detected break; zero breaks returns the input unchanged (`[samples]`),
+  making both call sites below regression-safe by construction for clips with
+  no ID switch.
+- **`src/reframe/crop_path.py`**: `build_crop_path()` gained a required `fps`
+  parameter. New `_interpolate_with_segment_breaks()` computes the existing
+  flat `np.interp()` as a bulletproof base, then — only if
+  `split_into_segments()` finds more than one segment — overwrites each
+  segment's own frame range with its own independent `np.interp()`, with the
+  boundary between segments placed at the frame midpoint between the two
+  segments' nearest real samples and **no interpolation drawn across the
+  gap** (a hard cut, not a single-point clamp — clamping one value can't fix
+  a multi-frame linear-ramp problem). Wrapped in try/except, falling back to
+  the plain flat `np.interp()` (today's exact pre-fix behavior) on any
+  failure. The existing 15-frame `_moving_average()` still runs on top,
+  unchanged, and will smooth a short (~±7 frame) transition around the hard
+  cut — a deliberate, accepted residual, not fixed further in this pass.
+- **`src/reframe/speaker_selection.py`**: `LightASDScorer.score_track()`
+  (`src/reframe/asd_scoring.py`) was confirmed to already operate generically
+  on whatever `frame_index` range its input boxes span — it needed **zero
+  changes** to score an arbitrary sub-segment of a track instead of a whole
+  `track_id`. New `TrackSegment` dataclass (`track_id`, `segment_index`,
+  `boxes`) and `_build_segments()` group tracks by `track_id` (same pattern
+  as before), then run each group through `split_into_segments()`.
+  `ASD_MIN_TRACK_SAMPLES` now filters **per segment** rather than per whole
+  `track_id`. **`select_primary_track_with_asd()`'s return type changed from
+  `int | None` to `list[TrackedFace]`** (empty list for "no primary," not
+  `None`) — it now returns the winning segment's boxes directly rather than a
+  track_id for the caller to re-filter by, which lines up cleanly with
+  `build_crop_path()`'s existing `if not primary_track_boxes` empty-list
+  guard. The pure heuristic `select_primary_track()` (largest total bbox
+  area) is **completely unchanged** — wrapped in a new `_heuristic_fallback()`
+  that adapts its `int | None` result to the new `list[TrackedFace]` shape —
+  preserving the exact same fallback safety net (ImportError, no scorable
+  candidates, model-load failure, no usable score) with no new failure mode
+  that could crash a whole reframe job. If segment-splitting itself throws, a
+  narrower fallback treats each `track_id` as one unsplit segment (today's
+  pre-fix grouping) rather than jumping straight to the full heuristic — ASD
+  can still score meaningfully on an unsplit track.
+- **`src/reframe/service.py`**: `run_reframe()` updated mechanically for both
+  signature changes — `select_primary_track_with_asd()` now returns boxes
+  directly (the old `primary_track_id` + re-filter step is gone), and
+  `build_crop_path()` is called with the now-required `fps` argument.
+
+**Known limitation, stated explicitly rather than glossed over**: this is a
+position-jump-velocity heuristic. In the bug's tightest form — two faces that
+are genuinely close together or overlapping — the center-to-center jump at
+the actual switch instant may itself be small, so `MAX_JUMP_PX_PER_SEC` may
+fail to catch exactly that case. This is a mitigation for switches with
+enough lateral separation to look like a jump, not a guaranteed fix for every
+occurrence of the reported symptom.
+
+**Verified locally** (hand-built `TrackedFace` fixtures, no CUDA GPU, no real
+two-person footage — same verification-style limitation as the rest of this
+module): `find_discontinuities`/`split_into_segments` against a fixture with
+smooth motion (no false-positive break) and an injected large jump (break
+detected at the correct index, splits into the correct segment count for
+both single- and multi-break cases); `fps <= 0` doesn't crash. `build_crop_path()`
+on the same injected-jump fixture confirmed the **pre-smoothing** interpolated
+array now holds each person's value flat right up to the segment boundary and
+jumps directly to the other person's value (no ramp across the gap) — verified
+by direct inspection of `_interpolate_with_segment_breaks()`'s output frame-by-
+frame; a no-discontinuity fixture produces byte-identical output to a
+manual re-implementation of the pre-fix flat-interp+smooth+clip code path
+(regression safety); empty boxes still freeze-center; forcing
+`split_into_segments` to raise confirmed the try/except fallback still
+returns a full-length path. `select_primary_track_with_asd()` against the
+same fixture (real CPU-fallback `LightASDScorer`, weights load correctly)
+confirmed segment grouping/per-segment `ASD_MIN_TRACK_SAMPLES` filtering/
+per-segment scoring-and-logging all wire up correctly, and that every
+fallback branch (no video file to score against, too-few-samples-per-segment,
+forced segment-split failure, empty tracks) returns the new `list[TrackedFace]`
+shape without crashing — real ASD *scores* are still meaningless without a
+real video file, same pre-existing gap already documented earlier in this
+file. Full chain (`_detect_and_track` → `select_primary_track_with_asd` →
+`build_crop_path`) re-run end-to-end against a synthetic zero-face test clip,
+confirmed no crash and correct output shapes with the new `fps` plumbing
+in place.
+
+**Not yet verified, needs a real vast.ai run with real two-person footage**
+(same caveat category as the rest of this module): whether
+`MAX_JUMP_PX_PER_SEC = 1800.0` actually distinguishes a real ID switch from
+legitimate fast head motion — the single biggest open risk, especially for
+the close/overlapping-faces case noted above; whether real (non-CPU-fallback)
+Light-ASD scores meaningfully discriminate between two segments of a split
+track; whether the rendered output actually looks visibly fixed (no fixture
+can prove this, only real two-person footage can); real-world frequency of
+ByteTrack ID switches, which affects whether the per-segment
+`ASD_MIN_TRACK_SAMPLES` filter is too aggressive or not aggressive enough in
+practice.
+
 ## Architecture
 
 Planned across 5 phases (details TBD as implementation proceeds).
@@ -1054,7 +1173,15 @@ re-verified with a real run — that's next:
    that `SNAP_WINDOW_SECONDS=2.0` is wide enough in practice (watch for repeated
    `snap: no word ... within 2.0s` warnings in the logs — a sign the window needs
    widening), and that clips using the new 61-75s stretch room actually read as
-   complete thoughts rather than padded.
+   complete thoughts rather than padded; confirm the
+   2026-08-01 crop-drift fix (`src/reframe/track_continuity.py`, the
+   segment-aware `build_crop_path()`, and per-segment ASD selection in
+   `speaker_selection.py`) actually keeps the crop locked onto one person
+   when two people are close together in real footage, and whether
+   `MAX_JUMP_PX_PER_SEC=1800.0` needs retuning (watch for either missed
+   switches — crop still drifting between two people — or over-triggering on
+   fast legitimate head motion, logged via the "Light-ASD scores per track
+   segment" / "method=heuristic" log lines).
 2. Get a real short face+speech test clip (e.g. a webcam recording) to close the one
    remaining local-verification gap: actual YOLOv8-face/ByteTrack/Light-ASD behavior
    against real content, still only checked for "doesn't crash" against a synthetic

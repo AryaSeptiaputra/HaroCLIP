@@ -114,15 +114,15 @@ def run_reframe(db: Session, highlight_clip_id: str, force: bool = False) -> Ref
         job.status = ReframeStatus.CROPPING
         db.commit()
 
-        primary_track_id = select_primary_track_with_asd(video_path, all_tracks, fps, logger=logger)
-        primary_boxes = [t for t in all_tracks if t.track_id == primary_track_id]
+        primary_boxes = select_primary_track_with_asd(video_path, all_tracks, fps, logger=logger)
         crop_w = compute_crop_width(width, height)
-        crop_path = build_crop_path(primary_boxes, width, height, total_frames)
+        crop_path = build_crop_path(primary_boxes, width, height, total_frames, fps)
         if crop_path:
             xs = [x for x, _y in crop_path]
+            primary_track_ids = {b.track_id for b in primary_boxes}
             logger.info(
-                "crop path: primary_track_id=%s pan range x=[%d, %d] (width=%d, crop_w=%d)",
-                primary_track_id, min(xs), max(xs), width, crop_w,
+                "crop path: primary_track_id(s)=%s pan range x=[%d, %d] (width=%d, crop_w=%d)",
+                primary_track_ids, min(xs), max(xs), width, crop_w,
             )
 
         job.status = ReframeStatus.RENDERING
