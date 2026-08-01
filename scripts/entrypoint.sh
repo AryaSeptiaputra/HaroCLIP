@@ -43,13 +43,12 @@ if ! command -v ffmpeg &> /dev/null; then
     echo "[entrypoint] installing ffmpeg..."
     apt-get update && apt-get install -y ffmpeg
 fi
-# Real bold font for captioning's burned-in text (src/captioning/subtitles.py's
-# ASS_TEMPLATE names "DejaVu Sans Bold" directly) — without it libass falls back
-# to an uncontrolled default font.
-if ! fc-list 2>/dev/null | grep -qi "DejaVu Sans"; then
-    echo "[entrypoint] installing fonts-dejavu-core..."
-    apt-get update && apt-get install -y fonts-dejavu-core
-fi
+# No font apt-package step needed here (removed 2026-08-01): captioning's
+# burned-in text font (Rubik Bold) is committed to git under
+# src/captioning/fonts/ and loaded directly by ffmpeg's subtitles filter
+# `fontsdir` option (src/captioning/service.py) — no OS-level font
+# installation required, unlike the old fonts-dejavu-core prerequisite this
+# replaced.
 if ! command -v sqlite3 &> /dev/null; then
     echo "[entrypoint] installing sqlite3 CLI..."
     apt-get update && apt-get install -y sqlite3

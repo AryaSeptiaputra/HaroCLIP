@@ -1009,6 +1009,117 @@ Claude's actual candidate-count judgment in practice tracks real content richnes
 same caveat category as the rest of highlight-detection quality (see the "Next
 steps" verification list below, which should be read as covering this too).
 
+**Caption font overhauled — FontSize 36→90, font switched DejaVu Sans Bold→Rubik
+Bold (vendored static instance), word-wrap overflow bug fixed, and a per-word
+background-highlight caption style prototyped then shelved (2026-08-01), driven
+by real user review of the `dc4fbe55` vast.ai run's actual output.** After
+watching the real burned captions from that run, user feedback was that `36`
+(the 2026-07-28 image-verified value) still read as small compared to typical
+viral-caption conventions — prompting a second real-render sizing pass, this
+time iteratively burning candidate sizes onto a real vertical clip locally
+(`data/vast/reframed/03ea78c1-...mp4`, a leftover 5s clip from the first
+buggy vast.ai run — real footage, fine for a pure sizing/legibility check even
+though its own duration is a known artifact of that earlier bug) rather than
+guessing from a formula, same practice as the original 14→72→36 pass:
+
+- **FontSize final = 90`** (`src/captioning/subtitles.py`'s `write_ass`
+  default), chosen after real burns at 36/42/60/90/120/180/270/320 — 270 and
+  320 both visibly clipped off both frame edges even for a short 3-word cue,
+  180 was flush against the edges (no margin left), 90 was clearly more
+  dominant than 36 while still leaving comfortable side margin for a normal
+  2-4 word burst cue.
+- **Local testing surfaced a real, previously-unnoticed overflow bug**: burning
+  a deliberately long (22-word) test cue at the new larger size showed
+  `WrapStyle: 2` (the `ASS_TEMPLATE` setting since this file was first
+  written) means "no automatic word wrap, only explicit `\N` breaks" — a cue
+  wider than the frame doesn't wrap to a second line, it silently overflows
+  and gets clipped off both edges with no visual indicator anything was cut.
+  Switched to **`WrapStyle: 0`** ("smart" wrapping, evenly split, top line
+  wider) — real-render-verified the same 22-word cue now correctly wraps into
+  multiple centered lines with nothing clipped. `build_burst_cues` already
+  caps normal cues at 4 words/1.5s so this is mainly a safety net (a single
+  unusually long word could still trigger it), not an expected everyday case.
+- **Font switched to Rubik**, per user direction — confirmed via web search to
+  be SIL Open Font License 1.1 (official Google Fonts family, no Reserved
+  Font Name declared), same license category as DejaVu Sans. Getting it
+  working correctly took real troubleshooting, itself a useful record:
+  - Google's own font repo (`google/fonts`, `ofl/rubik/`) ships Rubik **only
+    as a variable font** (`Rubik[wght].ttf`, `wght` axis 300–900) — unlike
+    DejaVu, there's no separate static per-weight file upstream.
+  - Installing that variable font locally (Windows, per-user font install —
+    copy to `%LOCALAPPDATA%\Microsoft\Windows\Fonts\` +
+    `AddFontResourceW` + `WM_FONTCHANGE` broadcast, all needed since a bare
+    registry entry alone isn't picked up by the current session) and
+    requesting `"Rubik"` or `"Rubik Bold"` from ffmpeg/libass **silently fell
+    back to Arial** — inspected via `fontTools`: the font's legacy family
+    name (nameID 1) is `"Rubik Light"` (the default named instance, weight
+    300); Bold/Medium/SemiBold/etc. exist only as `fvar` axis positions, not
+    separate legacy family names, so a non-variable-aware matcher (confirmed
+    for libass's DirectWrite backend on Windows) can't resolve them by name
+    at all. Requesting `"Rubik Light"` specifically did resolve correctly,
+    proving the loading mechanism itself worked — just not the weight wanted.
+  - **Fix**: used `fonttools varLib.instancer` to freeze the `wght=700`
+    instance into a standalone static font, with its name-table records
+    renamed to `"Rubik Bold"` / `"Rubik-Bold"` — the same "name the bold
+    weight directly, sidestep matching ambiguity" trick the retired DejaVu
+    convention used, just applied via font-generation instead of relying on
+    an upstream-shipped file. Real-render-verified:
+    `fontselect: (Rubik Bold, 400, 0) -> Rubik-Bold, 0, Rubik-Bold` (no
+    fallback) after the rename, vs. falling back to Arial before it.
+  - The generated `Rubik-Bold-static.ttf` (~212KB) is **committed to git**
+    under `src/captioning/fonts/`, alongside `OFL.txt` (full upstream
+    license text) and `NOTICE.md` (provenance, the variable-font-ambiguity
+    story above, and the exact `fonttools` snippet to regenerate it) — same
+    vendoring pattern as `src/detection/light_asd/`'s committed checkpoint +
+    `LICENSE`/`NOTICE.md`, chosen over downloading/generating it at
+    build/entrypoint time since it's small, deterministic, and needs no
+    network access or `fonttools` as a runtime dependency.
+  - **`fontsdir` (ffmpeg's `subtitles` filter option) loads the font directly
+    from `src/captioning/fonts/`** (`FONTS_DIR` in `src/captioning/service.py`,
+    passed alongside the existing `subtitles=` filter argument) — discovered
+    while debugging the above, and adopted as the loading mechanism instead
+    of an OS-level font install entirely. This is a strict simplification
+    over the old approach: **`fonts-dejavu-core` is no longer a system
+    prerequisite at all** — removed from `Dockerfile`, `scripts/entrypoint.sh`,
+    and `VAST_GUIDE.md` (all three previously had a check-then-`apt-get
+    install fonts-dejavu-core` step; none of them need any font-related step
+    now, since `COPY . .` / `git clone` already brings the committed font
+    file along, and `fontsdir` doesn't need it OS-installed).
+- **A per-word background-highlight caption style was prototyped, then
+  shelved by user direction ("kita tunda rancangan ini, sepertinya perlu
+  proses yang panjang") — not an open "revisit if X" item, recorded here as
+  considered-and-closed, same as the earlier custom-Pillow-renderer
+  discussion.** The ask was: instead of the current `\k` karaoke effect
+  (spoken word's *text color* changes), give the spoken word a highlighted
+  *background box* while text color stays constant throughout. Standard ASS
+  override tags can't do this (no inline way to toggle `BorderStyle`'s opaque
+  background mode per word within one `\k`-timed line), so a working
+  prototype was built and real-render-verified successfully: `Pillow`
+  (already available, no new prod dependency needed for this narrow
+  measurement-only use — a deliberately smaller ask than the shelved
+  full-custom-renderer idea) measures each word's real pixel width against
+  the actual `Rubik-Bold-static.ttf` at the target size, then two ASS
+  `Dialogue` lines are emitted per word: a lower-layer `\p1` vector-drawn
+  filled rectangle timed to exactly that word's `[start, end]` (no `\k`
+  needed — plain per-line timing does the on/off), plus an upper-layer text
+  run in one constant color spanning the whole cue. Real burn confirmed the
+  box correctly follows the currently-active word with text color never
+  changing. **Known unresolved gap at shelving time**: this prototype's
+  manual single-line layout has no wrap fallback (unlike the `WrapStyle=0`
+  fix above) — a cue whose total measured width exceeds the frame can overflow
+  past the margin, real-render-confirmed with a longer 4-word test cue.
+  Never touched production code — entirely scratchpad experimentation, no
+  cleanup needed. Revisit only on a future explicit user request.
+**Verification status**: all of the above (WrapStyle fix, Rubik Bold
+resolution, `fontsdir` loading) is real-render-verified, but **only on this
+Windows dev machine** — the actual production font-matching backend on
+vast.ai is Linux/fontconfig, not Windows/DirectWrite. Risk is judged low
+since `Rubik-Bold-static.ttf`'s renamed, unambiguous ASCII family name is the
+same kind of name any font matcher (fontconfig included) resolves trivially,
+and `fontsdir` is a documented, backend-agnostic libass/ffmpeg feature — but
+per this project's standing caveat category, it's still unconfirmed until a
+real vast.ai run actually burns a clip and the output is inspected.
+
 **Reframe crop-center-drifts-between-two-people bug fixed with a two-layer,
 track-continuity-aware selection/interpolation fix (2026-08-01), per user
 report.** User observed: when two people are close together in a frame, the
@@ -1128,6 +1239,40 @@ ByteTrack ID switches, which affects whether the per-segment
 `ASD_MIN_TRACK_SAMPLES` filter is too aggressive or not aggressive enough in
 practice.
 
+**Light-ASD re-evaluated against newer ASD models, per explicit user request
+after the crop-drift fix above — kept as-is, shelved not reopened
+(2026-08-01).** User asked whether a stronger ASD model exists worth a small
+production-cost increase. Researched current AVA-ActiveSpeaker benchmark
+standings:
+- **LR-ASD** (same author as Light-ASD, Springer IJCV 2025 — an explicit
+  "extended version" of Light-ASD): 94.45% mAP vs. Light-ASD's 94.1%
+  (+0.35pp), MIT-licensed, pretrained weights published at
+  `github.com/Junhua-Liao/LR-ASD`.
+- **LoCoNet** (CVPR 2023): 95.2% mAP (+1.1pp), but ~22.5M params / 2.6G FLOPs
+  vs. Light-ASD's 1.0M / 0.6G (~22× heavier) — and its official repo
+  (`github.com/SJTUwxz/LoCoNet_ASD`) has **no LICENSE file at all** (confirmed
+  via the GitHub API, `license: null`), making it legally unusable to vendor
+  without contacting the authors for explicit permission.
+- **TalkNCE** (ICASSP 2024): 95.5% mAP (+1.4pp) — the TalkNCE repo itself is
+  MIT, but it is LoCoNet trained with an added contrastive loss, not a
+  standalone architecture, so it inherits both LoCoNet's heavier compute
+  profile and effectively the same licensing blocker.
+- **D²Stream** (arXiv, Dec 2025, newest claimed SOTA): 95.6% mAP, but no
+  public code or weights found — too immature to depend on.
+- The field is effectively at a plateau (94.1-95.6% mAP across all of the
+  above) — no genuinely large accuracy jump is available at any price point
+  right now, only single-digit-percentage-point gains.
+
+**Decision: keep Light-ASD, fully shelved, not an open "revisit if X"
+item.** Per the user's explicit choice among the options presented
+(try LR-ASD / pursue LoCoNet-family despite the license gap / shelve
+everything), the user picked shelving everything. Not reopened
+autonomously — only on a future explicit user request, same treatment as
+the custom-Pillow-caption-renderer and per-word-background-highlight
+decisions above. If revisited later, LR-ASD is the lowest-effort path (MIT,
+same-author codebase, small gain); LoCoNet/TalkNCE would need the license
+question resolved with their authors first before any vendoring work starts.
+
 ## Architecture
 
 Planned across 5 phases (details TBD as implementation proceeds).
@@ -1173,7 +1318,15 @@ re-verified with a real run — that's next:
    that `SNAP_WINDOW_SECONDS=2.0` is wide enough in practice (watch for repeated
    `snap: no word ... within 2.0s` warnings in the logs — a sign the window needs
    widening), and that clips using the new 61-75s stretch room actually read as
-   complete thoughts rather than padded; confirm the
+   complete thoughts rather than padded; confirm the 2026-08-01 caption font
+   overhaul (`FontSize=90`, `FontName=Rubik Bold` loaded via `fontsdir` from
+   `src/captioning/fonts/`, `WrapStyle=0`) actually resolves correctly on the
+   rented instance's Linux/fontconfig libass backend the same way it did on
+   this dev machine's Windows/DirectWrite backend (real-render-verified there,
+   not yet confirmed on Linux at all) — watch the ffmpeg log for a
+   `fontselect: ... -> Rubik-Bold` line same as the one captured locally; a
+   fallback to some other font here would mean `fontsdir`/the vendored
+   `Rubik-Bold-static.ttf` isn't being picked up as expected; confirm the
    2026-08-01 crop-drift fix (`src/reframe/track_continuity.py`, the
    segment-aware `build_crop_path()`, and per-segment ASD selection in
    `speaker_selection.py`) actually keeps the crop locked onto one person

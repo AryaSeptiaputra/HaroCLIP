@@ -35,6 +35,15 @@ FFMPEG_TIMEOUT_SECONDS = 600
 # src/captioning/subtitles.py's ASS_TEMPLATE — rather than as a force_style
 # override here, since libass reads that section directly from the .ass input.
 
+# src/captioning/fonts/ holds Rubik-Bold-static.ttf (see that directory's
+# NOTICE.md for provenance) — passed to ffmpeg's subtitles filter as
+# `fontsdir` so libass loads the font directly from this file, with no OS-
+# level font installation step needed at all (no apt package, no Dockerfile/
+# entrypoint.sh prerequisite — this replaced the old fonts-dejavu-core setup
+# on 2026-08-01). Real-render-verified: without fontsdir, "Rubik Bold" isn't
+# a name any font matcher can resolve on its own.
+FONTS_DIR = Path(__file__).resolve().parent / "fonts"
+
 
 def get_or_create_caption_job(db: Session, highlight_clip_id: str) -> CaptionJob:
     job = (
@@ -126,7 +135,8 @@ def run_captioning(db: Session, highlight_clip_id: str, force: bool = False) -> 
                     "ffmpeg", "-y",
                     "-i", str(reframed_path),
                     "-vf",
-                    f"subtitles='{_escape_subtitles_path(ass_path)}'",
+                    f"subtitles='{_escape_subtitles_path(ass_path)}'"
+                    f":fontsdir='{_escape_subtitles_path(FONTS_DIR)}'",
                     # Final deliverable is always forced to 1080x1920 @ 120fps here,
                     # regardless of what the upstream reframe stage produced (belt-
                     # and-suspenders on top of OUTPUT_WIDTH/OUTPUT_HEIGHT already

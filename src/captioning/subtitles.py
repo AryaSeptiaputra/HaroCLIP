@@ -18,7 +18,7 @@ DEFAULT_MAX_DURATION = 1.5
 # word-by-word highlighted captions. NOT yet visually confirmed against a real
 # local libass render as of writing (this project's own convention is to verify
 # style values against real rendered output rather than trust the spec alone —
-# see the FontSize-36 story below) — if libass renders this backwards, swap
+# see the FontSize story below) — if libass renders this backwards, swap
 # which constant fills PrimaryColour vs SecondaryColour in ASS_TEMPLATE.
 BASE_COLOR = "&H00FFFFFF"  # white — "not yet spoken"
 KARAOKE_ACTIVE_COLOR = "&H0000FFFF"  # yellow — "spoken"
@@ -33,13 +33,31 @@ NUMBER_WORD_RE = re.compile(r"\d")
 # A curated keyword list is an easy future extension — add entries here.
 EMPHASIS_KEYWORDS: frozenset[str] = frozenset()
 
-# FontSize=36 (not the original 14, far too small on a 1080-wide vertical frame
-# — but 72 was tried first and, verified visually against real footage, was FAR
-# too large, covering nearly half the frame; 36 is a real, image-verified middle
-# ground, not a formula-derived guess). FontName names the bold weight directly
-# (sidesteps ASS Bold-flag parsing ambiguity) — real font must be installed
-# system-side, see Dockerfile/VAST_GUIDE.md/scripts/entrypoint.sh
-# (fonts-dejavu-core).
+# FontSize=90 (2026-08-01, raised from 36 per user feedback that a real
+# vast.ai-rendered clip at 36 still read as small against typical viral-caption
+# conventions, despite 36 itself being deliberately image-verified — see the
+# retired FontSize-14/72/36 history in git blame for that earlier pass). Real
+# local burn-in comparisons at 36/42/60/90/120/180/270/320 (2026-08-01) showed
+# 270+ already clips off both frame edges and 180 is flush against them; 90 is
+# clearly bigger/more dominant than 36 while leaving comfortable margin either
+# side for a normal 2-4 word cue.
+#
+# FontName="Rubik Bold" (switched from "DejaVu Sans Bold" the same day, per
+# user direction after confirming Rubik is SIL OFL-licensed / open source).
+# Naming the bold weight directly (rather than relying on the ASS Bold style
+# flag) sidesteps Bold-flag parsing ambiguity — same reasoning as the retired
+# DejaVu convention. Unlike DejaVu, Rubik isn't distributed as separate static
+# weight files upstream (Google Fonts ships it only as a variable font,
+# `Rubik[wght].ttf`) — `src/captioning/fonts/Rubik-Bold-static.ttf` is a
+# locally-instanced static Bold (wght=700) build with its name table renamed
+# to "Rubik Bold" for exactly this reason; see
+# `src/captioning/fonts/NOTICE.md` for full provenance and why the plain
+# variable font doesn't resolve by name (real-render-verified: it silently
+# fell back to Arial instead of erroring). Loaded via ffmpeg's `subtitles`
+# filter `fontsdir` option pointed at `src/captioning/fonts/` (see
+# `src/captioning/service.py`) — no OS-level font installation needed at all,
+# which also means `fonts-dejavu-core` is no longer a system prerequisite
+# (removed from Dockerfile/VAST_GUIDE.md/scripts/entrypoint.sh).
 #
 # MarginV=480, MarginR=140, MarginL=60 (2026-08-01, narrowed from a generic
 # TikTok/Reels/Shorts MarginV=260 estimate to TikTok + YouTube Shorts specifically
@@ -64,16 +82,28 @@ EMPHASIS_KEYWORDS: frozenset[str] = frozenset()
 # platform publishes official specs) — best available estimates, not a
 # substitute for confirming against the real apps on an actual phone (still
 # open, see the verification-caveat section in CLAUDE.md).
+#
+# WrapStyle=0 (not 2): with WrapStyle=2 ("no word wrap, only explicit \\N
+# breaks"), a cue whose text is wider than PlayResX-MarginL-MarginR doesn't
+# wrap — it just overflows and gets clipped off both edges of the frame,
+# silently, with no visual indication anything was cut. Real-render-verified
+# (2026-08-01): a deliberately long 22-word test cue at FontSize=90 rendered
+# as one clipped line under WrapStyle=2, and correctly auto-wrapped into
+# multiple centered lines — none clipped — under WrapStyle=0 ("smart"
+# wrapping, evenly split, top line wider). build_burst_cues already caps
+# normal cues at 4 words/1.5s so this rarely triggers in practice, but it's a
+# real edge case (e.g. one unusually long word) worth a safety net rather
+# than a silent clip.
 ASS_TEMPLATE = """[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
 PlayResY: {height}
-WrapStyle: 2
+WrapStyle: 0
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Karaoke,DejaVu Sans Bold,36,{active},{base},&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,3,0,2,60,140,480,1
+Style: Karaoke,Rubik Bold,{fontsize},{active},{base},&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,3,0,2,60,140,480,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -224,6 +254,7 @@ def write_ass(
     video_width: int,
     video_height: int,
     extra_keywords: frozenset[str] = EMPHASIS_KEYWORDS,
+    font_size: int = 90,
 ) -> None:
     lines = [
         ASS_TEMPLATE.format(
@@ -231,6 +262,7 @@ def write_ass(
             height=video_height,
             active=KARAOKE_ACTIVE_COLOR,
             base=BASE_COLOR,
+            fontsize=font_size,
         )
     ]
     for cue in cues:

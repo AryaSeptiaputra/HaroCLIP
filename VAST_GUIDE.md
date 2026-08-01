@@ -97,11 +97,11 @@ git clone https://github.com/AryaSeptiaputra/HaroCLIP.git
 cd HaroCLIP
 git checkout vast-ai-e2e-prep
 
-apt-get update && apt-get install -y ffmpeg fonts-dejavu-core   # most PyTorch templates
-# don't include either — fonts-dejavu-core is required for legible burned-in
-# captions (src/captioning/service.py's SUBTITLE_STYLE names "DejaVu Sans Bold"
-# directly; without the package installed, libass falls back to an uncontrolled
-# default font)
+apt-get update && apt-get install -y ffmpeg   # most PyTorch templates don't include it
+# No font apt-package needed anymore (removed 2026-08-01): captioning's
+# burned-in text font (Rubik Bold) is committed to git under
+# src/captioning/fonts/ and loaded directly by ffmpeg's subtitles filter
+# `fontsdir` option — no OS-level font installation step at all.
 
 pip install -r requirements.txt
 # torch is already installed by the template — do NOT reinstall it, that's the
