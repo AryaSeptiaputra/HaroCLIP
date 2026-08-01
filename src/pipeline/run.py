@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from src.campaign_brief.exceptions import CampaignBriefError
+from src.campaign_brief.service import apply_campaign_brief
 from src.captioning.enums import CaptionStatus
 from src.captioning.service import run_captioning
 from src.highlights.enums import HighlightStatus
@@ -19,6 +21,7 @@ from src.processing.service import run_processing
 from src.reframe.enums import ReframeStatus
 from src.reframe.service import run_reframe
 from src.utils.db import SessionLocal, init_db
+from src.utils.logging import get_job_logger
 
 
 def main() -> None:
@@ -47,15 +50,31 @@ def main() -> None:
         "--campaign-file",
         help="Path to a text file containing the campaign brief/prompt — use this "
         "instead of --campaign-context for a longer brief. Mutually exclusive with "
-        "--campaign-context.",
+        "--campaign-context and --campaign-pdf.",
+    )
+    parser.add_argument(
+        "--campaign-pdf",
+        help="Path to a campaign brief PDF, summarized via Claude (Haiku) using "
+        "native PDF document input into a descriptive prompt that replaces "
+        "--campaign-context/--campaign-file. Mutually exclusive with those two flags.",
+    )
+    parser.add_argument(
+        "--hf-token",
+        help="Optional Hugging Face token, persisted on the ingestion job and "
+        "exported as HF_TOKEN right before transcription (avoids faster-whisper's "
+        "unauthenticated-requests rate-limit warning). With --job-id, updates the "
+        "existing job's stored token.",
     )
     args = parser.parse_args()
 
     if bool(args.url) == bool(args.job_id):
         print("exactly one of --url or --job-id is required", file=sys.stderr)
         sys.exit(1)
-    if args.campaign_context and args.campaign_file:
-        print("only one of --campaign-context or --campaign-file may be given", file=sys.stderr)
+    if sum(bool(x) for x in (args.campaign_context, args.campaign_file, args.campaign_pdf)) > 1:
+        print(
+            "only one of --campaign-context, --campaign-file, or --campaign-pdf may be given",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     campaign_context = args.campaign_context
@@ -67,7 +86,7 @@ def main() -> None:
     try:
         if args.url:
             print(f"[1/5] Ingestion: submitting {args.url}")
-            job = create_job(db, args.url, campaign_context=campaign_context)
+            job = create_job(db, args.url, campaign_context=campaign_context, hf_token=args.hf_token)
             run_validation(job.id)
             db.refresh(job)
             if job.status != JobStatus.READY:
@@ -86,12 +105,34 @@ def main() -> None:
             if job.status != JobStatus.READY:
                 print(f"ingestion job {job.id} is not ready (status={job.status.value})", file=sys.stderr)
                 sys.exit(1)
+            updated_fields = []
             if campaign_context is not None:
                 job.campaign_context = campaign_context
+                updated_fields.append("campaign context")
+            if args.hf_token is not None:
+                job.hf_token = args.hf_token
+                updated_fields.append("HF token")
+            if updated_fields:
                 db.commit()
-                print(f"[1/5] Ingestion: resuming from existing job_id={job.id} (campaign context updated)")
+                print(
+                    f"[1/5] Ingestion: resuming from existing job_id={job.id} "
+                    f"({', '.join(updated_fields)} updated)"
+                )
             else:
                 print(f"[1/5] Ingestion: resuming from existing job_id={job.id}")
+
+        if args.campaign_pdf:
+            pdf_path = Path(args.campaign_pdf)
+            print(f"Applying campaign brief: {pdf_path}")
+            try:
+                job = apply_campaign_brief(
+                    db, job.id, pdf_path.read_bytes(), pdf_path.name,
+                    logger=get_job_logger("campaign_brief", job.id),
+                )
+            except CampaignBriefError as e:
+                print(f"FAILED at campaign brief summarization: [{e.stage}] {e.message}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Campaign brief summarized ({len(job.campaign_context)} chars)")
 
         print("[2/5] Processing: downloading + extracting audio")
         proc = run_processing(db, job.id, force=args.force)

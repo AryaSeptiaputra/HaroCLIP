@@ -65,6 +65,12 @@ export function JobDetail({ trackedJob }: { trackedJob: TrackedJob | null }) {
           <dd>{job.video_codec ?? "—"}</dd>
           <dt>Audio codec</dt>
           <dd>{job.audio_codec ?? "—"}</dd>
+          {job.campaign_context && (
+            <>
+              <dt>Campaign context</dt>
+              <dd className={styles.campaignContext}>{job.campaign_context}</dd>
+            </>
+          )}
         </dl>
       )}
 

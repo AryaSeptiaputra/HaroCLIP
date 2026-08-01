@@ -67,7 +67,7 @@ steps" for merge status):
   `IngestionJob.campaign_context`** (`build_system_prompt()` — an additional filter
   appended to the base system prompt, not a replacement: still has to be a genuine
   hook first, campaign relevance breaks ties rather than overriding the hook bar) to
-  get 5-10 ranked candidate segments as
+  get up to 15 ranked candidate segments as
   strict JSON (`parse_candidates` validates timestamps/duration, drops malformed
   entries rather than failing the whole job), then renders each as a clip via ffmpeg
   (`src/rendering/clipper.py`, `-ss`/`-t` as *input* options so re-encoding stays
@@ -422,11 +422,12 @@ happened to produce).
   (`src/captioning/service.py`) now does one extra lookup —
   `db.get(IngestionJob, ingestion_job_id)` — to get the title; no schema/migration
   needed, `CaptionJob.output_path` is just a string column.
-  **Known accepted limitation**: two ingestion jobs sharing an identical video title
-  would collide in the flat `data/captioned/` directory (rank alone doesn't
-  disambiguate across videos) — not solved, since the requested filename format has no
-  room for a disambiguating job id. Recorded as closed, not an open "revisit if X" item
-  — reopen only on explicit user request.
+  **Formerly a known accepted limitation, now resolved (2026-08-01, see "Per-video
+  output folders" below)**: two ingestion jobs sharing an identical video title used
+  to collide in the flat `data/captioned/` directory (rank alone doesn't disambiguate
+  across videos). Closed by nesting every render under a `data/captioned/<ingestion_job_id>/`
+  subfolder instead of changing the filename itself — the title-slug filename stays
+  exactly as described above, just no longer needs to be globally unique.
 - The final captioning ffmpeg burn-in pass now explicitly forces `-s 1080x1920 -r 120`
   on its output, regardless of what the upstream reframe stage produced (belt-and-
   suspenders on top of `OUTPUT_WIDTH`/`OUTPUT_HEIGHT` already being 1080x1920 in
@@ -728,6 +729,285 @@ running anything ML-related locally):**
   `HF_HUB_DISABLE_XET=1` (forces the plain Python downloader) or by pre-downloading via
   `hf download <model>` in the user's own terminal first, then running with
   `HF_HUB_OFFLINE=1` so the script never touches the network.
+
+**Platform video metadata now captured during processing (2026-08-01).**
+`src/processing/downloader.py::download_platform_video()` already called
+`yt_dlp.YoutubeDL(opts).extract_info(url, download=True)` and only used the returned
+`info` dict for `prepare_filename(info)` — the rest (description, upload date,
+uploader, platform) was discarded. It now also returns a `PlatformVideoMetadata`
+(`src/processing/metadata.py::extract_platform_metadata()`, a pure function over the
+`info` dict — no extra network call, the dict was already being fetched), and
+`run_processing()` (`src/processing/service.py`) persists it onto four new nullable
+`ProcessingJob` columns: `description`, `upload_date` (raw yt-dlp `"YYYYMMDD"` string,
+not parsed to a date), `uploader`, `platform` (yt-dlp's `extractor_key`, e.g.
+`"Youtube"`/`"TikTok"`). Always `NULL` for `DIRECT`-link jobs (plain `httpx` streaming,
+no yt-dlp `info` dict ever exists on that path) — `download_direct_video()` itself is
+unchanged. Deliberately distinct from `IngestionJob.raw_metadata` (an earlier,
+possibly-shallower JSON blob captured at ingestion *validation* time via
+`extract_flat: "in_playlist"`) — this is the full-depth `info` dict from the actual
+download call. Existing `data/haroclip.db` files need the usual one-time manual
+migration (`scripts/entrypoint.sh` applies it automatically and idempotently; see
+`VAST_GUIDE.md`'s migration list for the exact `ALTER TABLE` statements).
+**Verification status**: `extract_platform_metadata()` is a pure function, easily
+unit-tested against a hand-built dict fixture — no real-content verification caveat
+applies to the mapping logic itself. Whether yt-dlp actually populates these fields
+reliably across the real range of target platforms is unverified locally (needs a
+real vast.ai run against real platform URLs).
+
+**Campaign brief PDF upload + Claude summarization (2026-08-01).** The
+"campaign context as a prompt" design (2026-07-29, see above) required the user to
+manually convert their brief into descriptive text themselves. That manual step is
+now optional: a campaign brief PDF can be uploaded directly and summarized into
+`IngestionJob.campaign_context` by Claude — closing this loop without resurrecting
+the removed `src/campaign/` module (per its own explicit instruction to build fresh
+rather than resurrect). New module `src/campaign_brief/` (deliberately a different
+name from the deleted `src/campaign/`):
+- `summarizer.py::summarize_campaign_brief(pdf_bytes)` sends the PDF directly to
+  Claude as a native `document` content block (base64, no beta header required) —
+  Claude reads both text and visual elements (charts/tables) in the brief natively,
+  so **no PDF-parsing library was added** (this repo had none before). Model:
+  `claude-haiku-4-5` (env override `CAMPAIGN_BRIEF_LLM_MODEL`, mirroring
+  `HIGHLIGHT_LLM_MODEL`'s pattern but kept as a separate variable — the two calls
+  have unrelated cost/quality requirements and shouldn't be forced to move together).
+  The system prompt explicitly instructs Claude to output flowing descriptive prose
+  (not bullets/JSON, ~150-400 words) since the result is inserted verbatim as
+  `campaign_context`, read by `build_system_prompt()` (unchanged) exactly like a
+  manually-written prompt.
+- `service.py::apply_campaign_brief()` persists the uploaded PDF to
+  `data/campaign_briefs/<ingestion_job_id>/brief.pdf` (path derived from
+  `ingestion_job_id`, same convention as `src/processing/storage.py::job_dir()` — no
+  new DB column for the path) **before** calling Claude, and the raw response to
+  `claude_response.txt` in the same directory after a successful call — for
+  provenance/debugging, not for the `llm_response_path`-style resume-skips-a-paid-call
+  mechanism: this operation has no downstream stage and no automatic retry driver, so
+  every invocation is a deliberate re-summarization (an unsupported alternative would
+  be to silently skip already-cached PDFs, but two design choices are recorded here as
+  a discussion, not a code branch — see task history if reopened).
+- New endpoint `POST /ingestion/jobs/{id}/campaign-brief` (multipart PDF upload,
+  synchronous — one bounded Haiku call, no `BackgroundTasks` needed unlike ingestion
+  validation's arbitrary-latency external URL fetch) and new CLI flag `--campaign-pdf
+  <path>` on `python -m src.pipeline.run` (three-way mutually exclusive with the
+  existing `--campaign-context`/`--campaign-file`), both calling the same
+  `apply_campaign_brief()`.
+- `python-multipart` is back in `requirements.txt` (needed for FastAPI's
+  `UploadFile`) — this is the same dependency removed alongside the old
+  `src/campaign/` module on 2026-07-25, re-added because this time the upload is
+  actually parsed and used, not just stored raw (the specific failure mode that got
+  the old module archived).
+- No new status-tracking model/table (`CampaignBriefJob`) — a single Claude call plus
+  one column update doesn't need multi-stage resume tracking; `CampaignBriefError`
+  (mirrors `HighlightError`/`ProcessingError`'s `stage`-tagged exception convention)
+  plus a plain `ValueError` for "job not found" is sufficient.
+**Verification status**: fully verifiable locally, no GPU involved — needs only
+`ANTHROPIC_API_KEY` and a real small PDF. Not yet verified against a real vast.ai run:
+whether the resulting summary, once flowing through `build_system_prompt()`, actually
+produces a measurably different/better set of highlight candidates (same caveat
+category as the rest of the campaign-context and highlight-detection work).
+
+**Ingestion form wired up to the campaign-brief PDF endpoint, plus per-request Claude
+key and a persisted per-job Hugging Face token (2026-08-01).** The campaign-brief PDF
+endpoint added above had never actually been called from `frontend/` — no client
+function existed for it. `SubmitJobForm.tsx` now has a native `<details>` "Advanced
+options" section (no new dependency) with a PDF file input, a Claude API key field,
+and an HF token field; submit does `createIngestionJob()` then, if a PDF was chosen,
+`uploadCampaignBrief()` right after — the job appears in the tracked list as soon as
+the first call succeeds, so a slow/failed brief summarization doesn't block or hide
+the job itself.
+- **Claude API key is request-scoped only, never persisted.** It's the only HTTP-
+  reachable path that calls Claude today (`highlights/llm.py`'s call is CLI-only, no
+  router exists for it) — sent as a `Form` field alongside the PDF
+  (`anthropic_api_key`, `src/api/routers/campaign_brief.py`), threaded through
+  `apply_campaign_brief()`/`summarize_campaign_brief()` as a plain function
+  parameter, and used as `anthropic.Anthropic(api_key=...)` when present (falls back
+  to the server's own `ANTHROPIC_API_KEY` env var otherwise). Never logged, never
+  written to `claude_response.txt`/DB — deliberately kept out of every place this
+  module already persists artifacts.
+- **HF token is the opposite tradeoff: persisted, because it's consumed later by a
+  separate CLI process.** Unlike the Claude key, nothing today calls
+  `transcribe()`/`WhisperModel` over HTTP — it only ever runs inside
+  `python -m src.highlights.run` or `pipeline.run`, invoked well after (sometimes a
+  different session/instance from) the browser request that created the job. So
+  `IngestionJob` gained an `hf_token` column (same persistence pattern as
+  `campaign_context`), settable from the form or via new `--hf-token` on
+  `pipeline.run` (threading into `create_job()` for a new job, or updating the
+  existing job on a `--job-id` resume, mirroring `--campaign-context`'s resume
+  handling). `run_highlight_detection()` (`src/highlights/service.py`) exports it as
+  `os.environ["HF_TOKEN"]` right before calling `transcribe()` — a deliberate global
+  env var mutation, safe here because this always runs as a single-job CLI process,
+  never a concurrent server request (the Claude key above is the server-request case,
+  which is why it's threaded as an explicit parameter instead). Only set when
+  present, so it never clobbers an already-`export`ed instance-level `HF_TOKEN` (e.g.
+  vast.ai's own env var) with `None`.
+- **`hf_token` is deliberately excluded from `IngestionJobRead`** (`src/ingestion/schemas.py`)
+  even though it's stored — unlike `campaign_context`, it's a credential, and
+  `GET /ingestion/jobs/{id}` is polled every 3s by `useTrackedJobs`, so echoing it
+  back would put it in the network tab on every poll. Same reasoning `raw_metadata`
+  already gets for staying out of the response model. Frontend key/token fields use
+  `type="password"` and live only in React component state (not `localStorage`) —
+  cleared on page reload, a deliberate tradeoff over persisting a secret client-side
+  (flagged as an XSS/devtools-inspection risk, not worth it for this project's current
+  no-auth, localhost-only API).
+- Existing `data/haroclip.db` files need the usual manual migration (see
+  `VAST_GUIDE.md`): `ALTER TABLE ingestion_jobs ADD COLUMN hf_token TEXT;` —
+  `scripts/entrypoint.sh` applies it automatically and idempotently, same pattern as
+  every other column added so far.
+**Verification status**: backend changes are straightforward parameter-threading, no
+GPU involved — verifiable locally via the FastAPI dev server + `sqlite3` inspection
+(confirm `hf_token` lands in the DB row but never appears in the `IngestionJobRead`
+JSON) and a real small-PDF campaign-brief call. Whether `HF_TOKEN` actually reaches
+`huggingface_hub`'s download call as intended can only be confirmed by inspecting
+`os.environ` at the right point locally (heavy ML deps aren't installed in this dev
+venv per the earlier verification-caveat notes) — same "needs a real vast.ai run"
+caveat as the rest of the transcription/highlight-detection path.
+
+**Per-video output folders for reframe/captions/captioned, closing the last flat
+directories (2026-08-01), per user direction.** Of the 8 top-level `data/` output
+directories, 5 were already grouped per `ingestion_job_id` (`data/videos/<id>/`,
+`data/clips/<id>/`, `data/campaign_briefs/<id>/`, `data/logs/<id>/`); `data/reframed/`,
+`data/captions/`, and `data/captioned/` were the only 3 still flat, mixing every
+video's files together in one directory (the last of the three had a real filename
+collision risk — see the now-resolved "Known accepted limitation" note above).
+- `src/reframe/storage.py::reframe_output_path()` and
+  `src/captioning/storage.py::caption_ass_path()`/`captioned_output_path()` all
+  gained a leading `ingestion_job_id` parameter and now create/return a path nested
+  under `<top-level-dir>/<ingestion_job_id>/...` — same convention the other 5
+  directories already used, just extended to the last 3. Filenames inside each
+  per-job folder are unchanged (`<highlight_clip_id>.mp4`/`.ass`,
+  `<title-slug>_captioned_<rank>.mp4`) — only a folder layer was added, not a
+  renaming scheme.
+- Both call sites (`src/reframe/service.py::run_reframe()`,
+  `src/captioning/service.py::run_captioning()`) already had `ingestion_job_id` in
+  scope right where the output path is built (it's what `get_job_logger()` was
+  already using), so this was a pure parameter-threading change — no new lookups,
+  no schema change (`ReframeJob.output_path`/`CaptionJob.ass_path`/`.output_path`
+  stay plain `String` columns storing a `DATA_DIR`-relative path, same as before).
+- **No migration of already-rendered files** — this only changes where *new* renders
+  land; anything rendered before this change stays at its old flat path on disk
+  (not moved, not deleted). Acceptable since the project has no real production
+  output yet, only local/synthetic verification runs (see the module's own
+  verification-caveat notes throughout this doc).
+- Considered and rejected: consolidating *all* per-video output (including the 5
+  already-correct directories) under one root folder per video (e.g.
+  `data/jobs/<id>/{videos,clips,reframed,...}/`). Would also close the mixing
+  problem and make a single `scp -r` copy the whole video's results off a vast.ai
+  instance, but touches every storage module including ones that already work
+  correctly, for a pure ergonomics gain over the smaller fix — out of scope for what
+  was asked; revisit only on explicit user request, not as a follow-up assumption.
+**Verification status**: verified locally via direct calls to the three updated
+storage functions (confirmed output paths nest under the job id as expected) and a
+plain import check of both `service.py` modules (no signature-mismatch errors at the
+single call site each function has). Not re-run through the full synthetic captioning
+regression fixture this session — same "needs a real vast.ai run" caveat as the rest
+of the reframe/captioning modules for confirming this holds up on production-scale
+output.
+
+**Frontend UI setup automated in `scripts/entrypoint.sh`, gated behind `ENABLE_UI`
+(2026-08-01), per user direction after a real vast.ai session hit avoidable setup
+friction.** Trying to run `frontend/` directly on a vast.ai instance (to fill out the
+ingestion form instead of typing CLI flags) surfaced that the vast.ai PyTorch/CUDA
+template has no Node.js/npm at all, and Debian's own `apt` package is too old for
+this project's Vite 8/React 19 frontend — both had to be worked around manually,
+mid-session, on a rented-by-the-hour instance.
+- New block in `scripts/entrypoint.sh`, gated by `if [ "${ENABLE_UI:-0}" = "1" ]`:
+  installs Node.js 20.x via NodeSource (only if `node` isn't already on `PATH`),
+  runs `npm install` in `frontend/` (only if `node_modules` is missing), and creates
+  `frontend/.env` from `.env.example` (only if missing) — same idempotent
+  check-then-install pattern already used for `ffmpeg`/`fonts-dejavu-core`/
+  `sqlite3`/YOLOv8-face weights earlier in this script.
+- **Deliberately gated, not unconditional**: most sessions only need the CLI
+  pipeline (see "Constraints" — instances are rented on-demand for GPU work, not
+  kept running for a UI), so installing Node.js on every boot would waste time for
+  sessions that never touch the frontend. Opt in via `ENABLE_UI=1` in vast.ai's
+  "Environment Variables" field, same place `ANTHROPIC_API_KEY`/`HF_TOKEN` already
+  go.
+- **Deliberately does NOT auto-start `uvicorn`/`npm run dev`** — per user direction,
+  only the slow/error-prone *setup* (Node install, `npm install`) is automated;
+  starting the two servers stays two explicit manual commands, so the user stays
+  aware of when the UI is actually running and consuming the instance's resources.
+- `VAST_GUIDE.md` gained a new "Using the browser UI on vast.ai (optional)" section
+  (now step 4, pushing "Collect results"/"What to check in the logs" to steps 5/6)
+  documenting the full flow end to end, including the specific SSH-tunnel mistake
+  hit in the real session that prompted this change: the tunnel command must run
+  from a **new terminal on the user's own local machine**, not from the SSH session
+  already controlling the instance — and it requires an SSH key registered on the
+  vast.ai account, which isn't needed for vast.ai's own Web Terminal access.
+**Verification status**: `bash -n scripts/entrypoint.sh` syntax-checked clean.
+Installing Node.js/running `npm install`/opening a real SSH tunnel can only be
+verified on an actual vast.ai instance by the user — not something reproducible on
+this local dev machine, so this is unverified beyond syntax until the next real
+vast.ai session.
+
+**Real vast.ai run surfaced a second highlights-stage LLM bug: `claude-sonnet-5` has
+no way to cap thinking token spend, so `MAX_NEW_TOKENS` needed a much bigger ceiling
+(2026-08-01).** A real ~57-minute video's transcript on a real vast.ai run failed at
+the detection stage with the same class of error the 2026-07-26 LLM switch's
+`MAX_NEW_TOKENS` bump (2048→8192) was meant to prevent — Claude's adaptive thinking
+consumed the *entire* 8192-token ceiling before writing any JSON, so
+`generate_candidates()` (`src/highlights/llm.py`) again hit
+`stop_reason == "max_tokens"` with an empty text response. Root cause this time isn't
+"the ceiling was too low for the old failure mode" — it's that **`claude-sonnet-5`
+(and the rest of the current-generation Claude 4.6+ family) removed the
+`budget_tokens` parameter that older models used to cap thinking directly**; sending
+it now returns a 400. Adaptive thinking has no fixed budget of its own, so the only
+remaining lever against "thinking ate the whole response budget" is a generous
+`max_tokens` ceiling — there's no way to bound thinking independently anymore.
+- `MAX_NEW_TOKENS` raised `8192`→`32000` — comment updated to explain the
+  `budget_tokens` removal rather than just restating "leaves headroom," so a future
+  reader doesn't reach for `budget_tokens` as a fix and hit the same 400.
+- **`generate_candidates()` switched from `client.messages.create()` to
+  `client.messages.stream()` + `.get_final_message()`** — a `max_tokens` this large
+  crosses the Anthropic SDK's own non-streaming safety guard, which raises a
+  client-side `ValueError` *before sending a request* if it estimates a non-streaming
+  call could run past ~10 minutes. `get_final_message()` returns the identical
+  `Message` shape `.create()` did (`.content`, `.usage`, `.stop_reason`), so no
+  downstream code (`parse_candidates`, the cached-response write, etc.) needed to
+  change.
+- No prompt or validation logic changed — this is purely a request-shape/ceiling fix,
+  same category as the original 2026-07-26 bump, not a hook-quality change.
+**Verification status**: syntax/import-checked locally (no local `ANTHROPIC_API_KEY`
+to smoke-test the real streaming call — same limitation noted throughout this
+module's other Claude API work). Confirming this actually clears the real transcript
+that triggered it requires re-running `python -m src.pipeline.run --job-id
+1b99fdb1-f128-4d6f-af16-5e690068a8d3` (or `python -m src.highlights.run --job-id
+1b99fdb1-f128-4d6f-af16-5e690068a8d3`) on the vast.ai instance — the ingestion/
+processing stages for that job already completed successfully before this failure,
+so `--job-id` resumes straight into the highlights stage without re-downloading.
+
+**Highlight candidate count target raised to a content-driven "up to 15", per user
+direction (2026-08-01).** Previously the prompt's output contract
+(`src/highlights/prompt.py`) told Claude to "return between 5 and 10 candidate
+clips" — a rigid numeric range — and `MAX_CANDIDATES = 10` (`src/highlights/llm.py`)
+silently truncated any longer response to 10 (`parse_candidates`'s
+`valid[:MAX_CANDIDATES]`). User's stated goal was more clips per video (10-15), but
+explicitly rejected simply swapping one rigid range for another
+("Buat logika yang longgar, keputusan jumlah clip dilihat dari isi konten juga, jadi
+keputusan banyaknya jumlah klip dilakukan oleh claude juga") — the count should be
+Claude's own judgment call based on how much genuine hook material a specific video
+actually contains, not a target forced regardless of content.
+- Prompt's output contract now reads: return as many genuinely hook-worthy
+  candidates as the content supports, up to a maximum of 15, explicitly framing a
+  dense/eventful video as commonly landing in 10-15 while a shorter/less eventful one
+  may genuinely only have a handful — and explicitly forbids padding the list with a
+  weak/borderline candidate just to reach a higher count. No forced minimum anymore
+  (the old prompt's implicit floor of 5 is gone).
+- `MAX_CANDIDATES` raised `10`→`15` in `src/highlights/llm.py` — kept as a defensive
+  ceiling in code (protects downstream reframe/captioning render cost from an
+  unbounded response), not reintroduced as a target; comment updated to say so
+  explicitly.
+- `MAX_NEW_TOKENS` (`32000`) comment's stale "5-10-candidate" reference updated to
+  match; the token math itself was already generous enough to cover a few more
+  candidates' worth of JSON without needing to change.
+- No other file changed — same reasoning as the jump-cut/snapping fixes above: every
+  downstream stage (`service.py`'s render loop, `reframe/`, `captioning/`,
+  `pipeline/run.py`) already queries/iterates `HighlightClip` rows with no count
+  assumption or `.limit()`, so this is fully contained to the prompt text and one
+  constant.
+**Verification status**: no local `ANTHROPIC_API_KEY` to smoke-test the real prompt
+change (same limitation as the rest of this module's Claude API work). Whether
+Claude's actual candidate-count judgment in practice tracks real content richness
+(rather than defaulting to either extreme) is unverified — needs a real vast.ai run,
+same caveat category as the rest of highlight-detection quality (see the "Next
+steps" verification list below, which should be read as covering this too).
 
 ## Architecture
 

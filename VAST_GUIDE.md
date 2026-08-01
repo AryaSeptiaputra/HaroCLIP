@@ -232,7 +232,19 @@ Also re-check anything that might have changed between commits:
   sqlite3 data/haroclip.db "ALTER TABLE highlight_clips ADD COLUMN segments_json TEXT;"
   sqlite3 data/haroclip.db "UPDATE highlight_clips SET segments_json = '[{\"start\": ' || start_seconds || ', \"end\": ' || end_seconds || '}]' WHERE segments_json IS NULL;"
   sqlite3 data/haroclip.db "ALTER TABLE caption_jobs RENAME COLUMN srt_path TO ass_path;"
+  sqlite3 data/haroclip.db "ALTER TABLE processing_jobs ADD COLUMN description TEXT;"
+  sqlite3 data/haroclip.db "ALTER TABLE processing_jobs ADD COLUMN upload_date VARCHAR;"
+  sqlite3 data/haroclip.db "ALTER TABLE processing_jobs ADD COLUMN uploader VARCHAR;"
+  sqlite3 data/haroclip.db "ALTER TABLE processing_jobs ADD COLUMN platform VARCHAR;"
+  sqlite3 data/haroclip.db "ALTER TABLE ingestion_jobs ADD COLUMN hf_token TEXT;"
   ```
+  The last four are for yt-dlp metadata capture (2026-08-01): `ProcessingJob` gained
+  `description`/`upload_date`/`uploader`/`platform` columns, populated from the
+  full-depth `info` dict `download_platform_video()` already fetches from yt-dlp at
+  download time (no extra network call) — nullable, and always `NULL` for direct-URL
+  (non-platform) jobs, which have no yt-dlp `info` dict at all. Distinct from
+  `IngestionJob.raw_metadata`, a separate JSON blob captured earlier at ingestion
+  validation time via a shallower `extract_flat` call.
   The middle two are for jump-cut clip support (2026-08-01): `HighlightClip` gained a
   `segments_json` column (a JSON list of `{start, end}` windows — more than one entry
   means a jump-cut clip stitched from non-contiguous moments) that rendering and
@@ -249,8 +261,108 @@ Also re-check anything that might have changed between commits:
   Skipping any of these makes the next write to that column fail with a `no such column`
   SQLite error — a fresh DB (no prior runs on this instance) needs nothing extra,
   `create_all` includes new columns from the start.
+  The final one (2026-08-01) is for a per-job HF token: `IngestionJob` gained an
+  `hf_token` column, settable via `--hf-token` on `pipeline.run`/`highlights.run` or
+  from the frontend's ingestion form. When set, `run_highlight_detection`
+  (`src/highlights/service.py`) exports it as the `HF_TOKEN` env var right before
+  transcription — it takes over the process env var for that run, so it wins over
+  (but doesn't require) the instance-level `export HF_TOKEN=...` from step 2 above.
+  Deliberately excluded from the `IngestionJobRead` API response (unlike
+  `campaign_context`) since it's a credential, not display data.
 
-## 4. Collect results before destroying the instance
+## 4. Using the browser UI on vast.ai (optional)
+
+The CLI (`python3 -m src.pipeline.run`) is the primary, always-supported way to run
+everything — this section is only for submitting a job through `frontend/`'s form
+instead of typing flags. **The UI only covers job creation** (video link, optional
+campaign brief PDF, optional Claude/HF API keys) — highlights/reframe/captioning are
+still CLI-only, so step 5 below (switching back to the CLI to actually run the
+pipeline) is not optional if you use the UI at all. Skip this whole section if typing
+CLI flags is fine for you.
+
+**1. Enable the setup.** Set `ENABLE_UI=1` in vast.ai's "Environment Variables" field
+(same place as `ANTHROPIC_API_KEY`/`HF_TOKEN`) before starting/restarting the
+instance — `scripts/entrypoint.sh` then installs Node.js 20.x and the frontend's
+`npm` dependencies automatically on boot (skipped by default otherwise, since most
+sessions never need Node.js at all). If the instance is already running and you don't
+want to restart it, run the same block by hand instead:
+```bash
+export ENABLE_UI=1
+bash scripts/entrypoint.sh
+```
+
+**2. Start both servers**, each in its own backgrounded shell (`Ctrl+Z` then `bg`, or
+open a second Web Terminal tab for the second command):
+```bash
+python3 -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+```
+```bash
+cd frontend && npm run dev
+```
+`python3`, not `python` — this image has no bare `python` on `PATH`. If `npm` itself
+is missing, step 1's `ENABLE_UI=1` setup didn't run yet (check for the
+`[entrypoint] ENABLE_UI=1: ...` log lines from `scripts/entrypoint.sh`).
+
+**3. Open an SSH tunnel — from a brand-new terminal window on your own local
+machine, not from the Web Terminal/SSH session you're already using to control the
+instance.** This is the single most common mix-up: running the `ssh` command below
+*inside* the instance just makes the instance try to SSH somewhere else and fails
+with "Network is unreachable" or similar. Get the **real** `ssh -p <port> root@<host>`
+command from vast.ai's instance "Connect" button (the values below are placeholders —
+don't paste them verbatim), then add the two `-L` forwards to that real command:
+```bash
+ssh -p <port> -L 5173:localhost:5173 -L 8000:localhost:8000 root@<host>
+```
+This opens a **second, separate** SSH session just for the tunnel — leave it running
+in that window for as long as you want the UI reachable. It requires an SSH key
+registered under vast.ai's **Account → SSH Keys** settings; if your only access so far
+has been vast.ai's Web Terminal (no key needed there) or an SSH session that was
+already open for you, generate a key locally and register it first:
+```bash
+ssh-keygen -t ed25519
+cat ~/.ssh/id_ed25519.pub   # paste this into vast.ai → Account → SSH Keys
+```
+A key added to an already-*running* instance may not take effect until the instance
+restarts — if you get "Permission denied (publickey)" right after adding a key, try
+restarting the instance before troubleshooting further.
+
+**4. Open `http://localhost:5173`** in your local browser (through the tunnel from
+step 3). The backend's CORS is locked to exactly this origin (`src/api/main.py`),
+which is why the tunnel forwards to `localhost` on both ends rather than the
+instance's public IP — a direct `http://<instance-ip>:5173` won't work. Fill in the
+video link, and optionally expand "Advanced options" for a campaign brief PDF and/or
+Claude/HF API keys, then submit.
+
+**5. Get the job's ID and run the actual pipeline via CLI.** The UI doesn't show the
+raw job ID anywhere in its current form — look it up on the instance instead:
+```bash
+sqlite3 data/haroclip.db "SELECT id, source_url, status FROM ingestion_jobs ORDER BY created_at DESC LIMIT 5;"
+```
+Wait until `status` reaches `ready` (the UI's job list also reflects this), then run
+the pipeline against that job id — this is the same `export ANTHROPIC_API_KEY=...`
+requirement as the pure-CLI flow in step 2 of this guide, so make sure that's still
+set in whichever shell you run this from:
+```bash
+python3 -m src.pipeline.run --job-id <id-from-the-query-above>
+```
+Submitting through the UI does **not** start any processing by itself — it only gets
+the video downloaded/validated and (optionally) the campaign brief summarized.
+
+**6. When you're done with the UI, stop both background servers** — they don't need
+to stay running while the CLI pipeline (step 5) does the actual GPU work, and leaving
+them up is a small amount of unnecessary resource use on a billed instance:
+```bash
+pkill -f uvicorn
+pkill -f vite
+```
+(Or `fuser -k 8000/tcp` / `fuser -k 5173/tcp` if `pkill` doesn't find them — e.g. you
+switched shells since starting them and `jobs -l`'s job table doesn't carry over.)
+
+There's no cost difference between creating a job via the UI vs. `--url` on the CLI —
+either way, the actual heavy work (transcription, detection, rendering) only happens
+when step 5's `pipeline.run --job-id` (or `--url` directly) is invoked.
+
+## 5. Collect results before destroying the instance
 
 Everything lands under `HaroCLIP/data/` (set via `DATA_DIR`, defaults to `./data`
 relative to wherever you ran the command):
@@ -263,13 +375,16 @@ relative to wherever you ran the command):
   this, it tells you whether the ASD deps/weights actually worked), VRAM usage after
   each model load, and (in `captioning.log`) word/cue counts per clip and ffmpeg
   burn-in duration.
-- `data/captioned/*.mp4` — **the final deliverable**: reframed clips with captions
-  burned in.
-- `data/reframed/*.mp4` — the dynamic vertical-crop clips *before* captioning (useful
-  to compare against `data/captioned/` if caption placement/timing looks off).
-- `data/captions/*.srt` — the generated subtitle files, one per clip — open these
-  directly if you want to check caption text/timing without opening the burned-in
-  video.
+- `data/captioned/<ingestion_job_id>/*.mp4` — **the final deliverable**: reframed
+  clips with captions burned in. Nested per ingestion job (2026-08-01) so results
+  from different videos never mix in the same folder.
+- `data/reframed/<ingestion_job_id>/*.mp4` — the dynamic vertical-crop clips *before*
+  captioning (useful to compare against `data/captioned/` if caption placement/timing
+  looks off). Also nested per ingestion job.
+- `data/captions/<ingestion_job_id>/*.ass` — the generated karaoke subtitle files
+  (not `.srt` — captioning switched to `.ass` in the 2026-08-01 karaoke-caption
+  rewrite), one per clip, also nested per ingestion job — open these directly if you
+  want to check caption text/timing without opening the burned-in video.
 - `data/clips/<ingestion_job_id>/` — the intermediate static clips (before reframing).
 - `data/haroclip.db` — SQLite DB with full job status/metadata if useful.
 
@@ -282,7 +397,7 @@ scp -r -P <port> root@<instance-ip>:~/HaroCLIP/data ./haroclip-results
 instance.) Then **destroy the instance** — don't leave it running once you have what
 you need.
 
-## 5. What to check in the logs afterward
+## 6. What to check in the logs afterward
 
 - `reframe.log`: search for `method=` — `method=light-asd` means real ASD scoring ran;
   `method=heuristic` means it fell back (check the `reason=` on that line — usually

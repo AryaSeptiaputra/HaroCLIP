@@ -37,6 +37,14 @@ class IngestionJob(Base):
     # Set at job creation, persists across --job-id resumes. See src/highlights/prompt.py.
     campaign_context: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Optional per-job Hugging Face token, exported as the HF_TOKEN env var by
+    # src/highlights/service.py right before transcription (avoids faster-whisper's
+    # "unauthenticated requests" rate-limit warning when downloading whisper
+    # weights). Deliberately NOT included in IngestionJobRead (src/ingestion/schemas.py)
+    # — unlike campaign_context, this is a credential and must never be echoed back
+    # over the API to the frontend/network tab on every status poll.
+    hf_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     error_stage: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 

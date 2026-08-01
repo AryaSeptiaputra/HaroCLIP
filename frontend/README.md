@@ -5,6 +5,11 @@ right now — UI work is paused for later backend modules until they're all done
 
 - **Ingestion** — submit a video link (direct file URL or a platform link like
   YouTube/TikTok) and watch its validation status resolve.
+- **Campaign brief (optional, "Advanced options")** — upload a PDF brief, summarized
+  automatically by Claude into `campaign_context` on the job.
+- **API keys (optional, "Advanced options")** — a Claude API key used once for the
+  brief-summarization call (never saved), and a Hugging Face token saved on the job
+  for the CLI transcription stage to use later.
 
 ## Setup
 
@@ -24,7 +29,8 @@ origin (already configured for `localhost:5173`).
   along with the campaign briefs module, which was the only other view).
 - `src/IngestionView.tsx` — the module's self-contained view (form + list + detail),
   owning its own state.
-- `src/api/` — typed fetch client: `createIngestionJob`/`getIngestionJob`.
+- `src/api/` — typed fetch client: `createIngestionJob`/`getIngestionJob`/
+  `uploadCampaignBrief`.
 - `src/hooks/useTrackedJobs.ts` — tracks submitted ingestion job IDs in `localStorage`
   (the ingestion backend has no list endpoint) and polls each non-terminal job every 3s
   until it reaches `ready`/`failed`.

@@ -128,7 +128,7 @@ def run_reframe(db: Session, highlight_clip_id: str, force: bool = False) -> Ref
         job.status = ReframeStatus.RENDERING
         db.commit()
 
-        out_path = reframe_output_path(highlight_clip_id)
+        out_path = reframe_output_path(ingestion_job_id, highlight_clip_id)
         render_start = time.monotonic()
         render_reframed_clip(video_path, crop_path, crop_w, out_path)
         render_duration = time.monotonic() - render_start

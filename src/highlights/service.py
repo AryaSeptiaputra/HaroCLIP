@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import os
 import time
 
 from sqlalchemy.orm import Session
@@ -70,6 +71,15 @@ def run_highlight_detection(
         job.error_stage = None
         job.error_message = None
         db.commit()
+
+        # Per-job HF token (set via the ingestion UI/CLI, see IngestionJob.hf_token)
+        # takes over the process env var right before the huggingface_hub download
+        # inside transcribe() picks it up. Only set when present — never clear an
+        # existing instance-level HF_TOKEN (e.g. vast.ai's own env var) with None.
+        # Safe as a global env var mutation here because this always runs as a
+        # single-job CLI process, never a concurrent multi-request server path.
+        if ingestion_job.hf_token:
+            os.environ["HF_TOKEN"] = ingestion_job.hf_token
 
         segments = transcribe(audio_path, logger=logger)
         transcript_text = " ".join(s.text for s in segments)

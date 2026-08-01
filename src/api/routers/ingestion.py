@@ -15,7 +15,12 @@ def create_ingestion_job(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    job = service.create_job(db, str(payload.source_url), campaign_context=payload.campaign_context)
+    job = service.create_job(
+        db,
+        str(payload.source_url),
+        campaign_context=payload.campaign_context,
+        hf_token=payload.hf_token,
+    )
     background_tasks.add_task(service.run_validation, job.id)
     return job
 

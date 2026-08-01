@@ -72,7 +72,13 @@ at 2:10 — the skipped part only repeated the earlier point.").
 
 Output contract:
 - Respond with STRICT JSON ONLY — a single JSON array, nothing before or after it.
-- Return between 5 and 10 candidate clips, ranked best-first.
+- Return as many genuinely hook-worthy candidate clips as the content actually \
+supports, ranked best-first — up to a maximum of 15. Let the number be driven by how \
+much real hook material exists in this specific video: a dense, eventful video may \
+fill most of that range (commonly 10-15), while a shorter or less eventful one may \
+genuinely only have a handful of real hooks. Never pad the list with a weak or \
+borderline candidate just to reach a higher count — every candidate still has to \
+clear the hook bar on its own merits.
 - Each element must be: {"segments": [{"start": <float seconds>, "end": <float \
 seconds>}, ...], "reason": "<short justification of the hook, and of any jump-cut>"}. \
 "segments" has exactly 1 entry for a normal clip, or 2-3 entries for a jump-cut.

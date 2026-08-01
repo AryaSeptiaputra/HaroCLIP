@@ -55,3 +55,47 @@
   font-size: 14px;
   color: var(--status-danger-text);
 }
+
+.hint {
+  margin: 4px 0 0;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.advanced {
+  margin-top: 8px;
+}
+
+.advancedSummary {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-h);
+  cursor: pointer;
+  user-select: none;
+}
+
+.advancedBody {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fileInput {
+  font-size: 14px;
+  color: var(--text-h);
+}
+
+.help {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}

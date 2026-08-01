@@ -10,12 +10,21 @@ from src.transcription.schemas import TranscriptSegment, TranscriptWord
 
 LLM_MODEL_NAME = os.getenv("HIGHLIGHT_LLM_MODEL", "claude-sonnet-5")
 # claude-sonnet-5 runs adaptive thinking by default when `thinking` is omitted, and
-# max_tokens is a hard cap on thinking + text output combined — 2048 was observed to
-# be entirely consumed by thinking on a real transcript, leaving zero text/JSON
-# output. 8192 leaves headroom for both on top of a full 5-10-candidate JSON array
-# (a few KB of text, well under 1k tokens).
-MAX_NEW_TOKENS = 8192
-MAX_CANDIDATES = 10
+# max_tokens is a hard cap on thinking + text output combined. Unlike older models,
+# Sonnet 5 has no `budget_tokens` escape hatch to cap thinking directly — passing one
+# is rejected outright (400) — so the only lever against "thinking ate the whole
+# budget" is a generous max_tokens ceiling. 2048 was observed insufficient on a real
+# transcript in local testing, and even 8192 was fully consumed by thinking on a real
+# ~57-minute video's transcript on a real vast.ai run (2026-08-01), leaving zero room
+# for the actual JSON output. 32000 leaves generous headroom for both on top of a full
+# up-to-15-candidate JSON array (a few KB of text, well under 1k tokens) — revisit
+# upward again if a future run's transcript is long/complex enough to exhaust this too.
+MAX_NEW_TOKENS = 32000
+# Not a target — the prompt deliberately leaves the actual candidate count up to
+# Claude's judgment of how much genuine hook material the video contains (see
+# prompt.py's output contract). This is purely a defensive ceiling so a runaway
+# response can't blow up downstream render/reframe/captioning cost unbounded.
+MAX_CANDIDATES = 15
 MIN_CLIP_SECONDS = 30
 # 60 remains the default/target ceiling (see prompt.py's duration rule); 75 is a
 # deliberate stretch allowance so Claude isn't forced to truncate a genuinely strong
@@ -60,12 +69,18 @@ def generate_candidates(
 
     client = anthropic.Anthropic()
     call_start = time.monotonic()
-    response = client.messages.create(
+    # Streaming (not a plain .create() call): the Anthropic SDK refuses a non-streaming
+    # request at this max_tokens size if it estimates the call could run past ~10
+    # minutes, raising a client-side ValueError before any request is even sent.
+    # .stream()/.get_final_message() returns the exact same Message shape as .create()
+    # (content/usage/stop_reason), so nothing below this needs to change.
+    with client.messages.stream(
         model=LLM_MODEL_NAME,
         max_tokens=MAX_NEW_TOKENS,
         system=system_prompt,
         messages=user_messages,
-    )
+    ) as stream:
+        response = stream.get_final_message()
     raw_response = "".join(block.text for block in response.content if block.type == "text")
 
     if logger:

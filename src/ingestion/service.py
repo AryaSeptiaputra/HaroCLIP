@@ -14,7 +14,10 @@ from src.utils.logging import get_job_logger
 
 
 def create_job(
-    db: Session, source_url: str, campaign_context: str | None = None
+    db: Session,
+    source_url: str,
+    campaign_context: str | None = None,
+    hf_token: str | None = None,
 ) -> IngestionJob:
     link_type = detect_link_type(source_url)
     job = IngestionJob(
@@ -22,6 +25,7 @@ def create_job(
         link_type=link_type,
         status=JobStatus.VALIDATING,
         campaign_context=campaign_context,
+        hf_token=hf_token,
     )
     db.add(job)
     db.commit()
@@ -29,9 +33,10 @@ def create_job(
 
     logger = get_job_logger("ingestion", job.id)
     logger.info(
-        "created job %s: source_url=%s link_type=%s campaign_context=%s",
+        "created job %s: source_url=%s link_type=%s campaign_context=%s hf_token=%s",
         job.id, source_url, link_type.value,
         f"{len(campaign_context)} chars" if campaign_context else "none",
+        "set" if hf_token else "none",
     )
     return job
 

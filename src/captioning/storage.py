@@ -17,12 +17,14 @@ def slugify(text: str | None) -> str:
     return slug[:SLUG_MAX_LENGTH].strip("_")
 
 
-def caption_ass_path(highlight_clip_id: str) -> Path:
-    CAPTIONS_DIR.mkdir(parents=True, exist_ok=True)
-    return CAPTIONS_DIR / f"{highlight_clip_id}.ass"
+def caption_ass_path(ingestion_job_id: str, highlight_clip_id: str) -> Path:
+    job_dir = CAPTIONS_DIR / ingestion_job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    return job_dir / f"{highlight_clip_id}.ass"
 
 
-def captioned_output_path(video_title: str | None, rank: int) -> Path:
-    CAPTIONED_DIR.mkdir(parents=True, exist_ok=True)
+def captioned_output_path(ingestion_job_id: str, video_title: str | None, rank: int) -> Path:
+    job_dir = CAPTIONED_DIR / ingestion_job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
     slug = slugify(video_title) or "video"
-    return CAPTIONED_DIR / f"{slug}_captioned_{rank:02d}.mp4"
+    return job_dir / f"{slug}_captioned_{rank:02d}.mp4"

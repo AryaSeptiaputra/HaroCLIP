@@ -11,6 +11,10 @@
 # Secrets are deliberately NOT set here: export ANTHROPIC_API_KEY and (optionally)
 # HF_TOKEN via vast.ai's own "Environment Variables" field on the instance/template
 # — never hardcode a real key value in this script, it's version-controlled.
+#
+# Optional: set ENABLE_UI=1 (same "Environment Variables" field) to also set up the
+# browser UI's frontend (Node.js + npm install) — see step 3b below and
+# VAST_GUIDE.md. Skipped by default since most sessions only need the CLI pipeline.
 
 set -uo pipefail
 
@@ -59,6 +63,34 @@ python3 -m pip install -r requirements.txt
 python3 -m pip install --upgrade faster-whisper ultralytics supervision python_speech_features
 python3 -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 
+# --- 3b. Frontend UI setup (optional, only when ENABLE_UI=1) ---
+# The UI is a convenience layer for the ingestion step (video link, campaign brief
+# PDF, API keys) — most sessions only need the CLI pipeline, so this whole block is
+# skipped unless explicitly opted into via vast.ai's own "Environment Variables"
+# field (same place as ANTHROPIC_API_KEY/HF_TOKEN). Starting uvicorn/npm run dev
+# themselves stays a manual step, deliberately not automated here — see
+# VAST_GUIDE.md's "Using the browser UI on vast.ai" section for the exact commands
+# and SSH tunnel setup.
+if [ "${ENABLE_UI:-0}" = "1" ]; then
+    if ! command -v node &> /dev/null; then
+        echo "[entrypoint] ENABLE_UI=1: installing Node.js 20.x..."
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+        apt-get install -y nodejs
+    fi
+    if [ ! -d frontend/node_modules ]; then
+        echo "[entrypoint] ENABLE_UI=1: installing frontend dependencies..."
+        (cd frontend && npm install)
+    fi
+    if [ ! -f frontend/.env ]; then
+        echo "[entrypoint] ENABLE_UI=1: creating frontend/.env from .env.example..."
+        cp frontend/.env.example frontend/.env
+    fi
+    echo "[entrypoint] ENABLE_UI=1: frontend ready. To start the UI, in two separate"
+    echo "[entrypoint]   shells: 'python3 -m uvicorn src.api.main:app --host 0.0.0.0"
+    echo "[entrypoint]   --port 8000' and 'cd frontend && npm run dev' — then open an"
+    echo "[entrypoint]   SSH tunnel from your local machine (see VAST_GUIDE.md)."
+fi
+
 # --- 4. cuBLAS/cuDNN fix (confirmed necessary on a real run — see VAST_GUIDE.md) ---
 # Persisted to .bashrc too so it's still set in any interactive shell you open later.
 CUBLAS_CUDNN_PATH=$(python3 -c "import os, nvidia.cublas.lib, nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__) + ':' + os.path.dirname(nvidia.cudnn.lib.__file__))")
@@ -98,6 +130,13 @@ if [ -f data/haroclip.db ]; then
             sqlite3 data/haroclip.db "ALTER TABLE ingestion_jobs ADD COLUMN campaign_context TEXT;"
         fi
     fi
+    if sqlite3 data/haroclip.db "SELECT name FROM sqlite_master WHERE type='table' AND name='ingestion_jobs';" 2>/dev/null | grep -q ingestion_jobs; then
+        HAS_HF_TOKEN_COLUMN=$(sqlite3 data/haroclip.db "PRAGMA table_info(ingestion_jobs);" 2>/dev/null | grep -c "hf_token" || true)
+        if [ "${HAS_HF_TOKEN_COLUMN:-0}" -eq 0 ]; then
+            echo "[entrypoint] migrating db: adding ingestion_jobs.hf_token..."
+            sqlite3 data/haroclip.db "ALTER TABLE ingestion_jobs ADD COLUMN hf_token TEXT;"
+        fi
+    fi
     if sqlite3 data/haroclip.db "SELECT name FROM sqlite_master WHERE type='table' AND name='highlight_clips';" 2>/dev/null | grep -q highlight_clips; then
         HAS_SEGMENTS_COLUMN=$(sqlite3 data/haroclip.db "PRAGMA table_info(highlight_clips);" 2>/dev/null | grep -c "segments_json" || true)
         if [ "${HAS_SEGMENTS_COLUMN:-0}" -eq 0 ]; then
@@ -119,6 +158,18 @@ if [ -f data/haroclip.db ]; then
                 sqlite3 data/haroclip.db "ALTER TABLE caption_jobs RENAME COLUMN srt_path TO ass_path;"
             fi
         fi
+    fi
+    if sqlite3 data/haroclip.db "SELECT name FROM sqlite_master WHERE type='table' AND name='processing_jobs';" 2>/dev/null | grep -q processing_jobs; then
+        # yt-dlp metadata columns added 2026-08-01 (description/upload_date/uploader/platform).
+        for col_spec in "description:TEXT" "upload_date:VARCHAR" "uploader:VARCHAR" "platform:VARCHAR"; do
+            col_name="${col_spec%%:*}"
+            col_type="${col_spec##*:}"
+            HAS_COL=$(sqlite3 data/haroclip.db "PRAGMA table_info(processing_jobs);" 2>/dev/null | grep -c "$col_name" || true)
+            if [ "${HAS_COL:-0}" -eq 0 ]; then
+                echo "[entrypoint] migrating db: adding processing_jobs.$col_name..."
+                sqlite3 data/haroclip.db "ALTER TABLE processing_jobs ADD COLUMN $col_name $col_type;"
+            fi
+        done
     fi
 fi
 

@@ -56,7 +56,11 @@ def run_processing(db: Session, ingestion_job_id: str, force: bool = False) -> P
         logger.info("downloading via %s: %s", ingestion_job.link_type.value, ingestion_job.source_url)
         download_start = time.monotonic()
         if ingestion_job.link_type == LinkType.PLATFORM:
-            video_path = download_platform_video(ingestion_job.source_url, dest_dir)
+            video_path, platform_metadata = download_platform_video(ingestion_job.source_url, dest_dir)
+            job.description = platform_metadata.description
+            job.upload_date = platform_metadata.upload_date
+            job.uploader = platform_metadata.uploader
+            job.platform = platform_metadata.platform
         else:
             video_path = download_direct_video(ingestion_job.source_url, dest_dir)
         download_duration = time.monotonic() - download_start

@@ -8,6 +8,10 @@ from src.ingestion.enums import JobStatus, LinkType
 class IngestionJobCreate(BaseModel):
     source_url: HttpUrl
     campaign_context: str | None = None
+    # Write-only: persisted onto the job so the CLI pipeline can later export it as
+    # the HF_TOKEN env var (see src/highlights/service.py). Deliberately absent from
+    # IngestionJobRead below — never echoed back in an API response.
+    hf_token: str | None = None
 
 
 class IngestionJobRead(BaseModel):

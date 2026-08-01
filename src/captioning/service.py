@@ -106,7 +106,7 @@ def run_captioning(db: Session, highlight_clip_id: str, force: bool = False) -> 
         clip_segments = [(s["start"], s["end"]) for s in json.loads(clip.segments_json)]
         words = slice_words_to_clip(segments, clip_segments)
         cues = build_burst_cues(words)
-        ass_path = caption_ass_path(highlight_clip_id)
+        ass_path = caption_ass_path(ingestion_job_id, highlight_clip_id)
         write_ass(cues, ass_path, OUTPUT_WIDTH, OUTPUT_HEIGHT)
         logger.info(
             "captions generated: %d words in clip range -> %d cues -> %s",
@@ -118,7 +118,7 @@ def run_captioning(db: Session, highlight_clip_id: str, force: bool = False) -> 
         db.commit()
 
         reframed_path = DATA_DIR / reframe_job.output_path
-        out_path = captioned_output_path(video_title, clip.rank)
+        out_path = captioned_output_path(ingestion_job_id, video_title, clip.rank)
         render_start = time.monotonic()
         try:
             result = subprocess.run(

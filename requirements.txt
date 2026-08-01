@@ -8,6 +8,11 @@ uvicorn[standard]
 pydantic
 python-dotenv
 httpx
+# python-multipart — required for FastAPI's UploadFile/File() (campaign brief PDF
+# upload, src/api/routers/campaign_brief.py). Same dependency removed alongside the
+# old src/campaign/ module (2026-07-25); re-added because this time the upload is
+# actually parsed/summarized, not just stored raw. See CLAUDE.md.
+python-multipart
 
 # --- Video / audio processing ---
 ffmpeg-python

@@ -47,6 +47,13 @@
   color: var(--text-h);
 }
 
+.campaignContext {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+}
+
 .errorBox {
   padding: 10px 12px;
   background: var(--status-danger-bg);

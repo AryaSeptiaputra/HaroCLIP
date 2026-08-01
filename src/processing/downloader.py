@@ -5,11 +5,12 @@ import httpx
 
 from src.ingestion.link_detection import DIRECT_MEDIA_EXTENSIONS
 from src.processing.exceptions import ProcessingError
+from src.processing.metadata import PlatformVideoMetadata, extract_platform_metadata
 
 DIRECT_DOWNLOAD_TIMEOUT_SECONDS = 300
 
 
-def download_platform_video(url: str, dest_dir: Path) -> Path:
+def download_platform_video(url: str, dest_dir: Path) -> tuple[Path, PlatformVideoMetadata]:
     import yt_dlp
 
     outtmpl = str(dest_dir / "source.%(ext)s")
@@ -35,16 +36,21 @@ def download_platform_video(url: str, dest_dir: Path) -> Path:
     except yt_dlp.utils.DownloadError as e:
         raise ProcessingError(str(e), stage="download")
 
+    # info is full-depth here (no extract_flat, unlike the earlier ingestion-stage
+    # validation call), so this is the richest point to capture platform metadata —
+    # no extra network cost, the dict is already sitting here.
+    metadata = extract_platform_metadata(info)
+
     path = Path(filename)
     if not path.exists():
         # merge_output_format may change the final extension after postprocessing
         merged = dest_dir / f"source.{opts['merge_output_format']}"
         if merged.exists():
-            return merged
+            return merged, metadata
         raise ProcessingError(
             f"expected downloaded file not found: {filename}", stage="download"
         )
-    return path
+    return path, metadata
 
 
 def download_direct_video(url: str, dest_dir: Path) -> Path:

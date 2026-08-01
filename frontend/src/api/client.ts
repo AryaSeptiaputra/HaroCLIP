@@ -55,8 +55,26 @@ function request<T>(path: string, init?: RequestInit): Promise<T> {
   );
 }
 
-export function createIngestionJob(sourceUrl: string): Promise<IngestionJobRead> {
+// Separate from request() above on purpose: a multipart body needs the browser to
+// set its own Content-Type (with boundary), so it must NOT get the
+// "application/json" header request() always attaches.
+function requestForm<T>(path: string, formData: FormData): Promise<T> {
+  return handleResponse<T>(() =>
+    fetch(`${API_BASE_URL}${path}`, {
+      method: "POST",
+      body: formData,
+    })
+  );
+}
+
+export function createIngestionJob(
+  sourceUrl: string,
+  opts?: { hfToken?: string }
+): Promise<IngestionJobRead> {
   const payload: IngestionJobCreate = { source_url: sourceUrl };
+  if (opts?.hfToken) {
+    payload.hf_token = opts.hfToken;
+  }
   return request<IngestionJobRead>("/ingestion/jobs", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -65,4 +83,17 @@ export function createIngestionJob(sourceUrl: string): Promise<IngestionJobRead>
 
 export function getIngestionJob(jobId: string): Promise<IngestionJobRead> {
   return request<IngestionJobRead>(`/ingestion/jobs/${jobId}`);
+}
+
+export function uploadCampaignBrief(
+  jobId: string,
+  file: File,
+  opts?: { apiKey?: string }
+): Promise<IngestionJobRead> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (opts?.apiKey) {
+    formData.append("anthropic_api_key", opts.apiKey);
+  }
+  return requestForm<IngestionJobRead>(`/ingestion/jobs/${jobId}/campaign-brief`, formData);
 }

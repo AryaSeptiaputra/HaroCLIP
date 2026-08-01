@@ -13,6 +13,7 @@ export interface IngestionJobRead {
   video_codec: string | null;
   audio_codec: string | null;
   title: string | null;
+  campaign_context: string | null;
   error_stage: string | null;
   error_message: string | null;
   created_at: string;
@@ -21,4 +22,8 @@ export interface IngestionJobRead {
 
 export interface IngestionJobCreate {
   source_url: string;
+  campaign_context?: string;
+  // Write-only on the backend (src/ingestion/schemas.py) — never comes back in
+  // IngestionJobRead, so there's no field for it above.
+  hf_token?: string;
 }
