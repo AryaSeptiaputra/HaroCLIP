@@ -225,12 +225,28 @@ Also re-check anything that might have changed between commits:
   migrations automatically and idempotently on every boot, so if you're using it
   as your On-start Script, a restart handles this for you. If you're setting up
   manually instead, apply any pending migration by hand against your **existing**
-  `data/haroclip.db` before resuming — e.g. the two added so far:
+  `data/haroclip.db` before resuming — e.g. the ones added so far:
   ```bash
   sqlite3 data/haroclip.db "ALTER TABLE highlight_jobs ADD COLUMN llm_response_path VARCHAR;"
   sqlite3 data/haroclip.db "ALTER TABLE ingestion_jobs ADD COLUMN campaign_context TEXT;"
+  sqlite3 data/haroclip.db "ALTER TABLE highlight_clips ADD COLUMN segments_json TEXT;"
+  sqlite3 data/haroclip.db "UPDATE highlight_clips SET segments_json = '[{\"start\": ' || start_seconds || ', \"end\": ' || end_seconds || '}]' WHERE segments_json IS NULL;"
+  sqlite3 data/haroclip.db "ALTER TABLE caption_jobs RENAME COLUMN srt_path TO ass_path;"
   ```
-  Skipping this makes the next write to that column fail with a `no such column`
+  The middle two are for jump-cut clip support (2026-08-01): `HighlightClip` gained a
+  `segments_json` column (a JSON list of `{start, end}` windows — more than one entry
+  means a jump-cut clip stitched from non-contiguous moments) that rendering and
+  captioning now read as the source of truth instead of the single `start_seconds`/
+  `end_seconds` pair (those two columns still exist, now just the overall span, for
+  display/logging). The `UPDATE` backfills any pre-existing rows as a single-segment
+  list so old clips stay readable — **not optional**, `slice_words_to_clip` will crash
+  on `NULL` `segments_json` during captioning otherwise.
+  The last one is for the karaoke-caption rewrite (2026-08-01): captioning now burns a
+  generated `.ass` file (word-by-word karaoke highlight) instead of a plain `.srt`, so
+  `CaptionJob.srt_path` was renamed to `ass_path` — only relevant if `caption_jobs`
+  already exists on this DB (i.e. captioning has run here before); a table that doesn't
+  exist yet gets `ass_path` for free from `create_all()`.
+  Skipping any of these makes the next write to that column fail with a `no such column`
   SQLite error — a fresh DB (no prior runs on this instance) needs nothing extra,
   `create_all` includes new columns from the start.
 

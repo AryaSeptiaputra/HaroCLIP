@@ -51,6 +51,13 @@ class HighlightClip(Base):
     # Plain string reference to HighlightJob.id — no real FK, same convention.
     highlight_job_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Authoritative source for rendering/captioning: JSON list of {"start", "end"}
+    # dicts, one entry per source-video segment (>1 entry = a jump-cut clip). See
+    # src/rendering/clipper.py and src/captioning/subtitles.py.
+    segments_json: Mapped[str] = mapped_column(Text, nullable=False)
+    # Overall span (segments[0].start, segments[-1].end) — display/logging only now;
+    # rendering and captioning read segments_json instead. Kept so existing log
+    # lines/CLI output that read these columns need no changes.
     start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
     end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)

@@ -106,7 +106,7 @@ API switch.
     run somewhat larger than the pre-caption reframed clips — captioning's ffmpeg
     pass uses `-crf 18` (2026-07-28, for legible burned-in text; default CRF 23
     under-serves compact high-contrast glyphs), which trades some file size for
-    sharpness. Still small in absolute terms for 30s-3min clips, not worth a
+    sharpness. Still small in absolute terms for 30-60s clips, not worth a
     precise figure here.
 
 Filter vast.ai listings by GPU **and** vCPU/RAM together — host specs vary between

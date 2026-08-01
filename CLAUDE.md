@@ -62,16 +62,19 @@ steps" for merge status):
   (`src/highlights/llm.py`, `anthropic` SDK — `ANTHROPIC_API_KEY` required) prompted
   with hand-designed "hook" principles (`src/highlights/prompt.py` — curiosity gap,
   surprising claim, emotional peak, concrete insight, controversial opinion; clips
-  **30s-3min**, spread across the *entire* video rather than clustered in one section,
+  **30-60s**, spread across the *entire* video rather than clustered in one section,
   natural sentence boundaries, self-contained), **optionally layered with
   `IngestionJob.campaign_context`** (`build_system_prompt()` — an additional filter
   appended to the base system prompt, not a replacement: still has to be a genuine
   hook first, campaign relevance breaks ties rather than overriding the hook bar) to
   get 5-10 ranked candidate segments as
   strict JSON (`parse_candidates` validates timestamps/duration, drops malformed
-  entries rather than failing the whole job), then renders each as a static clip via
-  ffmpeg (`src/rendering/clipper.py` — plain temporal cut, `-ss`/`-t` as *input* options
-  so re-encoding stays frame-accurate without the `-ss`+`-to` absolute-timeline gotcha).
+  entries rather than failing the whole job), then renders each as a clip via ffmpeg
+  (`src/rendering/clipper.py`, `-ss`/`-t` as *input* options so re-encoding stays
+  frame-accurate without the `-ss`+`-to` absolute-timeline gotcha) — **each candidate
+  may be one continuous span or, since 2026-08-01, a "jump-cut" of up to 3
+  non-contiguous segments stitched together when they serve the same single point**,
+  see "Highlight clips can now be 'jump-cuts'" further down for the full story.
   Tracked in `highlight_jobs`/`highlight_clips`, same loose string-reference convention
   as `processing_jobs`.
 
@@ -115,8 +118,11 @@ steps" for merge status):
   `select_primary_track_with_asd()`, see below), builds a smoothed/interpolated
   horizontal crop path (`src/reframe/crop_path.py` — pure numpy math, no I/O) for a
   fixed-height 9:16 vertical strip that pans to follow the speaker (never crops
-  vertically), then renders it via OpenCV (per-frame crop+resize to 1080×1920) with a
-  final ffmpeg pass to remux the original audio (`src/reframe/renderer.py`). Tracked in
+  vertically), then renders it (`src/reframe/renderer.py`) by cropping/resizing each
+  frame with OpenCV and piping the raw result into a single ffmpeg subprocess that
+  encodes straight to libx264 (`-crf 17`) and stream-copies in the original audio from
+  a second input — see "Reframe's crop encode switched off a lossy intermediate codec"
+  below for why this isn't a plain OpenCV `VideoWriter` anymore. Tracked in
   `reframe_jobs`, keyed by `highlight_clip_id` — one reframe job per clip, unlike other
   modules' per-ingestion-job granularity (the CLI still takes `--job-id
   <ingestion_job_id>` for UX consistency and loops over that job's clips internally).
@@ -140,13 +146,13 @@ steps" for merge status):
   reloaded and sliced+time-shifted to each clip's `[start_seconds, end_seconds]` window
   (`src/captioning/subtitles.py::slice_words_to_clip`), then greedily grouped into
   short cues (`build_burst_cues` — closes a cue at 4 words or 1.5s, whichever comes
-  first) and written as a plain hand-formatted `.srt` (`write_srt` — no subtitle
-  library dependency added). Burn-in is a **separate ffmpeg pass after** reframe's own
-  render, not folded into it: reframe's final remux is a pure stream-copy (`-c:v copy`)
-  for speed, but subtitle burn-in requires decoding, so captioning re-encodes
-  (`-vf "subtitles=...:force_style=..." -c:v libx264 -c:a copy`) from the already-final
-  reframed video into `data/captioned/<highlight_clip_id>.mp4` — the true final
-  deliverable. Tracked in `caption_jobs`, keyed by `highlight_clip_id` (same
+  first) and written as a hand-formatted `.ass` (`write_ass` — no subtitle library
+  dependency added; see "Captions became word-by-word karaoke" below for why `.ass`
+  replaced the original plain `.srt`). Burn-in is a **separate ffmpeg pass after**
+  reframe's own render, not folded into it: captioning re-encodes
+  (`-vf "subtitles='<ass path>'" -c:v libx264 -crf 18 -c:a copy`) from the
+  already-final reframed video into `data/captioned/<highlight_clip_id>.mp4` — the
+  true final deliverable. Tracked in `caption_jobs`, keyed by `highlight_clip_id` (same
   one-job-per-clip convention as `reframe_jobs`), status
   `pending→generating→rendering→ready`/`failed`. Wired into `src/pipeline/run.py` as
   stage `[5/5]`, after the reframe loop; if a clip's reframe didn't reach `ready`,
@@ -168,12 +174,16 @@ steps" for merge status):
   `Bold`-flag parsing ambiguity) and bumped `Outline` `2`→`3` to match.
   **`fonts-dejavu-core` is now a required system prerequisite** (`Dockerfile`,
   `VAST_GUIDE.md`, `scripts/entrypoint.sh`) — without it, libass falls back to
-  whatever fontconfig finds by default, uncontrolled. Also added
-  `original_size=1080x1920` to the `subtitles` filter (explicit libass scaling
-  context instead of relying on undocumented auto-detection) and `-crf 18` to the
+  whatever fontconfig finds by default, uncontrolled. Also added `-crf 18` to the
   libx264 re-encode (default CRF 23 under-serves compact high-contrast text
-  glyphs; this is the one ffmpeg call in the project that gets an explicit CRF,
-  since it's the final deliverable pass — no other call has this convention).
+  glyphs) — this was, at the time, the one ffmpeg call in the project with an
+  explicit CRF; as of 2026-08-01 `src/reframe/renderer.py`'s crop encode also has
+  one (`-crf 17`), for a different reason — captioning's 18 is a final-deliverable
+  quality target, reframe's 17 is intermediate headroom against the lossy
+  re-encode stacked on top of it, not the deliverable quality itself. (The
+  `original_size=1080x1920` filter option mentioned in earlier versions of this
+  doc no longer applies — the karaoke rewrite below moved to a real `.ass` file,
+  whose own `PlayResX`/`PlayResY` supersede it.)
 - Frontend (`frontend/`): React/Vite/TS app, currently just the ingestion view (no more
   tab shell — that was for switching to the now-removed campaign briefs module).
   **UI work is paused** (per user, 2026-07-25) until all backend modules are done —
@@ -241,6 +251,197 @@ new router, no frontend, one nullable column plus a prompt-building change. If a
 fuller brief-upload/structured-extraction flow (or Whop integration) comes back
 later, treat it as a fresh module built on top of this, not a resurrection of the
 removed `src/campaign/` code.
+
+**Highlight clips can now be "jump-cuts" — stitched from up to 3 non-contiguous
+source-video segments (2026-08-01).** Previously a `HighlightClip` was always exactly
+one continuous `[start, end]` window. `HighlightClip.segments_json` (new column, JSON
+list of `{"start", "end"}` dicts — the source of truth for rendering/captioning now;
+`start_seconds`/`end_seconds` still exist but are just the overall span, kept for
+display/logging) lets a single clip stitch together multiple separated moments from
+the source video, hard-cut together (no crossfade). This is **always available to
+Claude as an option, not a flag** — `src/highlights/prompt.py`'s "Jump-cuts" rules
+instruct it to default to one continuous segment and only reach for a jump-cut when
+both hold: (a) there's a meaningfully-sized chunk between the kept segments that's
+genuinely not needed for the point (filler/tangent/repetition, not a few seconds of
+"um"), and (b) the stitched result is convincingly better than the best available
+continuous window for the same idea. **Critically, all segments in one clip must still
+serve the SAME single idea/point** — a jump-cut is for cutting dead weight out of one
+story, never for splicing separate hooks together to hit the duration bar; the prompt
+explicitly forbids that and requires the `reason` field to name what was skipped and
+why, both to force the model to justify the cut and to give a manual spot-check point
+during real-run verification (this coherence rule can't be validated in code, only
+instructed and spot-checked). Constraints enforced in `parse_candidates`
+(`src/highlights/llm.py`): `MAX_SEGMENTS_PER_CLIP = 3`, `MIN_SEGMENT_SECONDS = 8`
+(conservative — segments stay long enough to feel natural, not like a random
+compilation), segments must be chronological/non-overlapping, and the **total**
+duration across all segments (not any single segment) is what's checked against the
+existing `MIN_CLIP_SECONDS`/`MAX_CLIP_SECONDS` (30-60s) bounds. `render_clip`
+(`src/rendering/clipper.py`) now takes a list of segments instead of one `start`/`end`
+pair — one ffmpeg call per clip, one `-ss`/`-t`-seeked input per segment (keeps the
+fast-seek behavior even for a segment deep into a long source video) feeding a
+`trim`/`atrim` + `concat` filter graph; this also covers the plain single-segment case
+(`N=1`) with no special-casing, so non-jump-cut clips render through the same code
+path as before. `slice_words_to_clip` (`src/captioning/subtitles.py`) — previously a
+flat `word.start - start_seconds` shift, only valid for one window — is rewritten to
+walk the clip's segments in order, dropping words that fall in the gap between
+segments, clamping words that straddle a segment boundary, and shifting by each
+segment's own start plus the cumulative duration of segments already placed, so
+caption timing stays correct across a jump-cut's boundary. Reframe (`src/reframe/`)
+needed **no changes** — it operates entirely on the already-rendered clip file via
+local frame index, never re-seeking into the source video by timestamp. Existing
+`data/haroclip.db` files need a one-time manual migration (see `VAST_GUIDE.md`):
+`ALTER TABLE highlight_clips ADD COLUMN segments_json TEXT;` plus a backfill of
+existing rows to a single-segment list derived from their `start_seconds`/
+`end_seconds` — `scripts/entrypoint.sh` applies both automatically and idempotently.
+**Verified locally**: `render_clip` against a synthetic multi-segment source (output
+duration matches the sum of segment durations, both for a single segment and a
+3-segment jump-cut), `parse_candidates` against hand-written valid/invalid multi-segment
+JSON (too many segments, segment under the minimum, overlapping/non-chronological
+segments, total duration out of bounds, mixed valid+invalid lists), and
+`slice_words_to_clip` against a hand-written transcript (gap words correctly dropped,
+boundary words correctly clamped, cumulative offset correct). **Not yet verified**:
+whether Claude's actual jump-cut judgment in practice respects the "same idea only"
+rule on a real video — needs a real vast.ai run, same caveat as highlight-detection
+quality generally.
+
+**Captions became word-by-word karaoke, with numeral emphasis and a safe-zone
+margin fix; reframe's crop encode switched off a lossy intermediate codec
+(2026-08-01).** Prompted by research into short-form-video communication science
+(word-by-word highlighted captions are cited at a 12-25% watch-time lift over static
+captions — the "eye-lock" effect of each word visually popping as it's spoken) plus a
+real quality bug found while investigating: `src/reframe/renderer.py` was encoding its
+per-frame crop/resize output with OpenCV's `cv2.VideoWriter(fourcc="mp4v")` — a weak
+codec — before captioning re-encoded it *again* with libx264, stacking a lossy
+intermediate ahead of the quality-defining final pass.
+
+- **Karaoke captions** (`src/captioning/subtitles.py`): burn-in switched from a plain
+  `.srt` to a generated `.ass` file using per-word ASS `\k` karaoke tags. Each burst
+  cue (still the existing ≤4-word/≤1.5s grouping from `build_burst_cues`, now enriched
+  with `CaptionCue.words`) starts fully white (`SecondaryColour=&H00FFFFFF`) and each
+  word turns yellow (`PrimaryColour=&H0000FFFF`) and *stays* yellow as the cue plays,
+  timed to the gap until the next word's actual onset (not the word's own
+  start/end) so the color change lands exactly when the next word is spoken. **Real
+  local libass verification** (this dev machine's ffmpeg has `libass`/`ass`/`subtitles`
+  filters compiled in, confirmed via `ffmpeg -filters`): rendered the generated `.ass`
+  onto a synthetic clip and visually inspected extracted frames — the
+  PrimaryColour-is-"sung"/SecondaryColour-is-"unsung" ASS convention rendered exactly
+  as expected on the first try, **no color-slot swap needed** (the plan going in
+  explicitly flagged this as needing real-render confirmation rather than trusting the
+  spec, same practice as the FontSize-36 story above).
+- **Numeral emphasis**: any word containing a digit gets a static cyan accent
+  (`NUMBER_ACCENT_COLOR = &H00FFFF00`, deliberately a different hue from the karaoke
+  yellow) via an inline `\1c\2c` override + trailing `\r` reset, so it reads as
+  accented whether or not it's the currently-"spoken" word — reinforcing this
+  project's existing hook philosophy that concrete numbers/specifics are part of what
+  makes a moment a genuine "concrete insight" hook (`src/highlights/prompt.py`).
+  Numbers-only for now (objective, no maintenance burden); `EMPHASIS_KEYWORDS` exists
+  as an empty `frozenset` for an easy future curated-word-list extension. Confirmed via
+  the same local render: a numeral stays cyan through its own cue and *after*, even
+  once a later word becomes the active spoken one.
+- **Safe-zone margin, narrowed to TikTok + YouTube Shorts specifically
+  (updated 2026-08-01)**: the `.ass` style's `MarginV`/`MarginR`/`MarginL` were
+  `260`/`60`/`60` (a rough "~13.5% of frame height" estimate framed generically as
+  "TikTok/Reels/Shorts"). Per user direction, Instagram Reels was dropped from the
+  target platform set and the margins were replaced with real researched per-app
+  safe-zone figures: `MarginV=480`, `MarginR=140`, `MarginL=60`. Since one burned-in
+  output has to clear both remaining platforms, each margin takes the **stricter**
+  of the two: TikTok's published safe-zone guides cite a ~484px bottom margin
+  (caption bar/sound attribution/username/overlays — rounded to 480) and ~140px
+  right margin (profile/like/comment/share/bookmark icon stack), both larger than
+  YouTube Shorts' figures (~300-400px bottom, ~96-120px right), so TikTok's numbers
+  win on both edges; left stays at 60px since neither app has a UI element there.
+  A side effect worth noting: with `Alignment=2` (bottom-center), libass centers
+  text within `[MarginL, PlayResX-MarginR]`, so the asymmetric 60/140 box biases
+  the caption slightly left of true frame-center — deliberate, not a bug, since it
+  nudges the caption away from the right-side icon column present on both apps.
+  These figures come from third-party creator-tool safe-zone guides (neither
+  platform publishes official specs) — confirmed locally only against the raw
+  frame edge, **not yet confirmed against the real apps' actual UI** (that still
+  needs a phone-side check, not just local rendering — the research narrows which
+  numbers to target, it doesn't replace that check).
+- **`src/captioning/service.py` simplified**: `SUBTITLE_STYLE`/`force_style`/
+  `original_size` are gone — style now lives entirely in `subtitles.py`'s
+  `ASS_TEMPLATE` `[V4+ Styles]` section, which the `.ass` file self-describes
+  (including its own `PlayResX`/`PlayResY`), so the ffmpeg `-vf` argument shrank to
+  just `subtitles='<path>'`.
+- **`CaptionJob.srt_path` renamed to `ass_path`** — a column rename on an existing
+  table, so it needs the project's usual manual-migration treatment: `scripts/
+  entrypoint.sh` now runs an idempotent `ALTER TABLE caption_jobs RENAME COLUMN
+  srt_path TO ass_path;` (only fires if the table exists and still has the old
+  column), same pattern documented in `VAST_GUIDE.md`'s migration list. A fresh
+  `caption_jobs` table gets `ass_path` for free from `create_all()`.
+- **Reframe's crop encode switched off a lossy intermediate codec**
+  (`src/reframe/renderer.py`): the `cv2.VideoWriter(fourcc="mp4v")` intermediate file
+  plus its separate stream-copy remux subprocess are gone, replaced by a single ffmpeg
+  subprocess — raw cropped/resized frames piped over stdin as one input, the original
+  clip as a second input for audio (stream-copied), video encoded straight to libx264
+  (`CROP_CRF = "17"`). 17 rather than the ffmpeg default 23 *or* captioning's
+  final-pass 18: this is still an intermediate that captioning re-encodes again, but
+  two stacked lossy re-encodes compound visible loss more than one
+  clearly-above-final-quality intermediate plus one final pass does — file size
+  doesn't matter here since captioning immediately re-encodes it anyway.
+  `FFMPEG_TIMEOUT_SECONDS` bumped `120`→`600` (same reasoning as `clipper.py`/
+  captioning's 600s budgets — this is now a real CPU-bound encode, not a stream copy).
+  One implementation subtlety: `proc.stderr` is drained on a background thread
+  *concurrently* with writing frames to `proc.stdin` — ffmpeg's own log/progress
+  output can fill the OS pipe buffer during a longer encode, and without draining it
+  while blocked on stdin writes, both sides can deadlock. **Verified locally**: a
+  synthetic 10-second 1920×1080 source clip rendered through the new path in ~4s,
+  producing a correctly-shaped (1080×1920, h264+aac, matching 10s duration) output
+  with no mp4v-typical blockiness on inspection, and the stderr-drain thread didn't
+  deadlock at that length (long enough to genuinely exercise concurrent
+  stdin-write/stderr-read, unlike a 2-3s clip).
+- **Full regression verified locally**: `run_captioning` run end-to-end against a
+  fake `HighlightJob`/`HighlightClip`/`ReframeJob` fixture (real transcript slicing,
+  real `.ass` generation, real libass burn-in against the real new reframe-pipeline
+  output) reached `READY`, with `job.ass_path`/`job.output_path` set correctly and a
+  word past the clip's end window correctly absent from the generated `.ass`. The
+  `srt_path`→`ass_path` `RENAME COLUMN` migration was tested against a throwaway
+  pre-existing `caption_jobs` row (data preserved) and confirmed idempotent (a second
+  run is a no-op).
+- **Still unverified, pending a real vast.ai run** (same caveat category as the rest
+  of this module): karaoke timing/color against *real* speech cadence rather than
+  hand-written fake word timestamps; whether `MarginV=480`/`MarginR=140` (see "Safe-zone
+  margin, narrowed to TikTok + YouTube Shorts" above) actually clear the real TikTok/
+  YouTube Shorts apps' UI (not just the raw frame edge); real encode-time/file-size
+  cost of `CROP_CRF=17` at production clip lengths on the rented GPU instance's CPU.
+
+**Custom per-frame caption renderer (Pillow) — researched, shelved, not
+implemented (2026-08-01).** While narrowing the safe-zone work above, the
+previously-deferred question of a Pillow/OpenCV-based custom caption renderer (as
+an alternative to the ASS/libass approach shipped this session) was revisited as a
+design-only discussion, per user direction — no code was written for it. Findings:
+- **ASS/libass already covers the most common ask (in/out animation) natively**:
+  `\fad(t1,t2)` (fade), `\t` transforms combined with `\fscx`/`\fscy` (scale
+  pop-in/out), and `\move` (slide) are all standard ASS tags — pure additions to a
+  `Dialogue` line, no new dependency, no new rendering pass. `ASS_TEMPLATE`
+  (`src/captioning/subtitles.py`) doesn't use any of these yet, so they remain a
+  cheap future extension within the existing approach if simple in/out animation is
+  ever wanted.
+- **A literal hybrid (ASS renders the base text, Pillow renders a separate effects
+  layer, composited via ffmpeg's `overlay` filter) is technically possible but
+  costly**: it requires two independent renders — a libass burn-in pass and a
+  separate Pillow-rendered alpha video — muxed together, which reintroduces a
+  stacked lossy re-encode pass, directly working against the mp4v-intermediate fix
+  just made to `src/reframe/renderer.py` this same session. Not a clean split.
+  If Pillow is ever genuinely needed for a clip (something no ASS tag combination
+  can express — e.g. content-aware positioning driven by `src/reframe/`'s face-track
+  data, or custom emoji glyphs), the recommendation on record is to render that
+  clip's *entire* caption text through Pillow rather than mixing ASS and Pillow
+  output for the same file.
+- **Cost if ever pursued**: new `Pillow` dependency (not in `requirements.txt`
+  today — no other module needs it); a new per-frame text-compositing pipeline
+  reusing the raw-frame-over-stdin-to-ffmpeg pattern from `src/reframe/renderer.py`,
+  but paying real per-frame Python compositing cost across 1080×1920 for a 30-60s
+  clip (unmeasured, and meaningfully more expensive than libass's one-shot C
+  rendering); loses the "no new pip dependency, libass is already a required system
+  prerequisite" simplicity that keeps the shipped ASS approach low-risk.
+- **Decision: shelved, not an open "revisit if X" item.** Per explicit user
+  instruction ("kita tanggalkan saja penggunaan pillow ini"), this isn't framed as
+  a standing recommendation to reconsider once some condition is met — it's
+  recorded here as considered-and-closed, the same way the Light-ASD-vs-TalkNet
+  evaluation above is. Reopen only on a future explicit user request, not on the
+  assistant's own judgment that a trigger condition has been reached.
 
 **Real Light-ASD is vendored** (`src/detection/light_asd/`, MIT-licensed, upstream
 `github.com/Junhua-Liao/Light-ASD`, attribution + deviations documented in
@@ -359,7 +560,15 @@ face+speech test clip, so word-burst grouping/timing and the actual on-screen ca
 look have only been checked against hand-written fake transcripts, and the ffmpeg
 `subtitles` burn-in has only been confirmed to run (not necessarily produce
 good-looking output) locally; also needs a real vast.ai run to confirm the rented
-instance's ffmpeg build actually has `libass` compiled in.
+instance's ffmpeg build actually has `libass` compiled in. **Update (2026-08-01):**
+the burn-in mechanism changed (karaoke `.ass` instead of plain `.srt`, see "Captions
+became word-by-word karaoke" above), and unlike most of this project's caption work,
+the karaoke color-slot mapping and the numeral-emphasis override *were* confirmed
+against a real local libass render this time (this dev machine's ffmpeg does have
+`libass` compiled in) — that specific risk is retired. The underlying "real speech
+cadence" and "real TikTok-app safe-zone clearance" caveats are unchanged and still
+open, since a hand-written fake transcript and a raw solid-color test frame are still
+not real speech or a real phone screen.
 
 **Tooling notes (discovered this session, cost real debugging time — read before
 running anything ML-related locally):**
@@ -397,8 +606,9 @@ Planned across 5 phases (details TBD as implementation proceeds).
 surfaced the context-window bug described above (highlight-detection LLM stage). Fixed
 by switching to the Claude API (2026-07-26) plus quality upgrades (whisper `float16`,
 YOLOv8-face `medium`, later `xlarge`) using the VRAM the local LLM no longer needs.
-**Captioning and the further YOLOv8-face `xlarge`/`imgsz=1280`/whisper `vad_filter`
-pass (also 2026-07-26) are new since that run and have never been exercised on
+**Captioning, the further YOLOv8-face `xlarge`/`imgsz=1280`/whisper `vad_filter`
+pass (also 2026-07-26), jump-cut clip support, and the karaoke-caption/reframe-encode
+rewrite (both 2026-08-01) are new since that run and have never been exercised on
 vast.ai at all.** None of this is yet re-verified with a real run — that's next:
 
 1. Re-run the full pipeline end-to-end on vast.ai with the current code
@@ -413,7 +623,16 @@ vast.ai at all.** None of this is yet re-verified with a real run — that's nex
    timing/grouping actually looks good against real speech, not just hand-written
    fake transcripts; confirm the `vad_filter`/`xlarge` changes actually measurably
    improve transcript/detection quality rather than just costing more compute for no
-   real benefit.
+   real benefit; confirm Claude's jump-cut choices on real content actually respect
+   the "same idea only, not a compilation of different hooks" rule (only locally
+   verified for validation/rendering/caption-timing correctness so far, never for
+   actual model judgment quality) and that the resulting hard cuts feel intentional
+   rather than jarring when watched back; confirm the karaoke word-highlight/numeral
+   accent actually reads well against real speech cadence (not hand-written fake
+   timestamps) and that `MarginV=260` actually clears the real TikTok/Reels/Shorts
+   apps' UI when viewed on an actual phone, not just the raw frame edge; confirm
+   `CROP_CRF=17`'s real encode-time cost on production-length clips fits comfortably
+   under the reframe stage's new 600s timeout on the rented GPU instance's CPU.
 2. Get a real short face+speech test clip (e.g. a webcam recording) to close the one
    remaining local-verification gap: actual YOLOv8-face/ByteTrack/Light-ASD behavior
    against real content, still only checked for "doesn't crash" against a synthetic

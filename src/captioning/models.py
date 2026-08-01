@@ -24,7 +24,7 @@ class CaptionJob(Base):
         nullable=False,
         default=CaptionStatus.PENDING,
     )
-    srt_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    ass_path: Mapped[str | None] = mapped_column(String, nullable=True)
     output_path: Mapped[str | None] = mapped_column(String, nullable=True)
     error_stage: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

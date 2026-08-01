@@ -6,9 +6,9 @@ CAPTIONS_DIR = DATA_DIR / "captions"
 CAPTIONED_DIR = DATA_DIR / "captioned"
 
 
-def caption_srt_path(highlight_clip_id: str) -> Path:
+def caption_ass_path(highlight_clip_id: str) -> Path:
     CAPTIONS_DIR.mkdir(parents=True, exist_ok=True)
-    return CAPTIONS_DIR / f"{highlight_clip_id}.srt"
+    return CAPTIONS_DIR / f"{highlight_clip_id}.ass"
 
 
 def captioned_output_path(highlight_clip_id: str) -> Path:

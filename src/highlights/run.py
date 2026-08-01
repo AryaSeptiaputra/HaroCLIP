@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 
 from dotenv import load_dotenv
@@ -37,7 +38,9 @@ def main() -> None:
         )
         print(f"highlight job {job.id} ready")
         for clip in clips:
-            print(f"  #{clip.rank} [{clip.start_seconds:.1f}-{clip.end_seconds:.1f}] {clip.output_path}")
+            segments = json.loads(clip.segments_json)
+            span = " + ".join(f"[{s['start']:.1f}-{s['end']:.1f}]" for s in segments)
+            print(f"  #{clip.rank} {span} {clip.output_path}")
             print(f"      reason: {clip.reason}")
     except ValueError as e:
         print(str(e), file=sys.stderr)

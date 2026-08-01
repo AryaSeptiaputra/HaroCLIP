@@ -1,3 +1,4 @@
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -7,12 +8,12 @@ from sqlalchemy.orm import Session
 from src.captioning.enums import CaptionStatus
 from src.captioning.exceptions import CaptioningError
 from src.captioning.models import CaptionJob
-from src.captioning.storage import caption_srt_path, captioned_output_path
+from src.captioning.storage import caption_ass_path, captioned_output_path
 from src.captioning.subtitles import (
     build_burst_cues,
     load_transcript,
     slice_words_to_clip,
-    write_srt,
+    write_ass,
 )
 from src.highlights.models import HighlightClip, HighlightJob
 from src.reframe.enums import ReframeStatus
@@ -24,22 +25,14 @@ from src.utils.logging import get_job_logger
 # 600 (not 120): same reasoning as src/rendering/clipper.py — this is also a
 # CPU-bound libx264 re-encode (plus -crf 18, slower than default), confirmed to
 # risk exceeding 120s on a high-resolution source. reframe/renderer.py's ffmpeg
-# call doesn't need this — it's a pure stream-copy remux, not a re-encode.
+# call is now also a real libx264 encode (not a stream copy) as of the
+# 2026-08-01 mp4v-bottleneck fix, so it carries its own explicit timeout — see
+# src/reframe/renderer.py's FFMPEG_TIMEOUT_SECONDS.
 FFMPEG_TIMEOUT_SECONDS = 600
-# Bottom-center burst captions: white text, black outline, no background box —
-# standard short-form-video look. Relies on the ffmpeg build having libass (the
-# `subtitles` filter) compiled in — see docs/hardware-spec.md / VAST_GUIDE.md.
-# FontSize=36 (not the original 14, far too small on a 1080-wide vertical frame —
-# but 72 was tried first and, verified visually against real footage, was FAR too
-# large, covering nearly half the frame; 36 is a real, image-verified middle
-# ground, not a formula-derived guess). FontName names the bold weight directly
-# (sidesteps ASS Bold-flag parsing ambiguity) — real font must be installed
-# system-side, see Dockerfile/VAST_GUIDE.md/scripts/entrypoint.sh
-# (fonts-dejavu-core). Outline bumped modestly to match the larger font.
-SUBTITLE_STYLE = (
-    "FontName=DejaVu Sans Bold,FontSize=36,PrimaryColour=&H00FFFFFF,"
-    "OutlineColour=&H00000000,BorderStyle=1,Outline=3,Alignment=2"
-)
+# Caption style (font, size, colors, karaoke/emphasis, safe-zone margin) now
+# lives entirely in the generated .ass file's own [V4+ Styles] section — see
+# src/captioning/subtitles.py's ASS_TEMPLATE — rather than as a force_style
+# override here, since libass reads that section directly from the .ass input.
 
 
 def get_or_create_caption_job(db: Session, highlight_clip_id: str) -> CaptionJob:
@@ -107,16 +100,17 @@ def run_captioning(db: Session, highlight_clip_id: str, force: bool = False) -> 
 
         transcript_path = DATA_DIR / highlight_job.transcript_path
         segments = load_transcript(transcript_path)
-        words = slice_words_to_clip(segments, clip.start_seconds, clip.end_seconds)
+        clip_segments = [(s["start"], s["end"]) for s in json.loads(clip.segments_json)]
+        words = slice_words_to_clip(segments, clip_segments)
         cues = build_burst_cues(words)
-        srt_path = caption_srt_path(highlight_clip_id)
-        write_srt(cues, srt_path)
+        ass_path = caption_ass_path(highlight_clip_id)
+        write_ass(cues, ass_path, OUTPUT_WIDTH, OUTPUT_HEIGHT)
         logger.info(
             "captions generated: %d words in clip range -> %d cues -> %s",
-            len(words), len(cues), srt_path.name,
+            len(words), len(cues), ass_path.name,
         )
 
-        job.srt_path = str(srt_path.relative_to(DATA_DIR))
+        job.ass_path = str(ass_path.relative_to(DATA_DIR))
         job.status = CaptionStatus.RENDERING
         db.commit()
 
@@ -129,9 +123,7 @@ def run_captioning(db: Session, highlight_clip_id: str, force: bool = False) -> 
                     "ffmpeg", "-y",
                     "-i", str(reframed_path),
                     "-vf",
-                    f"subtitles='{_escape_subtitles_path(srt_path)}'"
-                    f":original_size={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}"
-                    f":force_style='{SUBTITLE_STYLE}'",
+                    f"subtitles='{_escape_subtitles_path(ass_path)}'",
                     "-c:v", "libx264",
                     # crf 18 (not left at ffmpeg's default 23): this is the final
                     # deliverable pass and the one ffmpeg call in the project that

@@ -116,19 +116,22 @@ def run_highlight_detection(
 
         dest_dir = clip_job_dir(ingestion_job_id)
         for rank, candidate in enumerate(candidates, start=1):
+            segments = candidate["segments"]
             out_path = dest_dir / f"clip_{rank:02d}.mp4"
             render_start = time.monotonic()
-            render_clip(video_path, candidate["start"], candidate["end"], out_path)
+            render_clip(video_path, [(s["start"], s["end"]) for s in segments], out_path)
+            span = " + ".join(f"[{s['start']:.1f}-{s['end']:.1f}]" for s in segments)
             logger.info(
-                "clip #%d rendered in %.1fs: [%.1f-%.1f] -> %s",
-                rank, time.monotonic() - render_start, candidate["start"], candidate["end"], out_path.name,
+                "clip #%d rendered in %.1fs: %s -> %s",
+                rank, time.monotonic() - render_start, span, out_path.name,
             )
             db.add(
                 HighlightClip(
                     highlight_job_id=job.id,
                     rank=rank,
-                    start_seconds=candidate["start"],
-                    end_seconds=candidate["end"],
+                    segments_json=json.dumps(segments),
+                    start_seconds=segments[0]["start"],
+                    end_seconds=segments[-1]["end"],
                     reason=candidate["reason"],
                     output_path=str(out_path.relative_to(DATA_DIR)),
                 )

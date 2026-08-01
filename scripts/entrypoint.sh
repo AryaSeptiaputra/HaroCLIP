@@ -39,9 +39,9 @@ if ! command -v ffmpeg &> /dev/null; then
     echo "[entrypoint] installing ffmpeg..."
     apt-get update && apt-get install -y ffmpeg
 fi
-# Real bold font for captioning's burned-in text (SUBTITLE_STYLE names
-# "DejaVu Sans Bold" directly) — without it libass falls back to an
-# uncontrolled default font.
+# Real bold font for captioning's burned-in text (src/captioning/subtitles.py's
+# ASS_TEMPLATE names "DejaVu Sans Bold" directly) — without it libass falls back
+# to an uncontrolled default font.
 if ! fc-list 2>/dev/null | grep -qi "DejaVu Sans"; then
     echo "[entrypoint] installing fonts-dejavu-core..."
     apt-get update && apt-get install -y fonts-dejavu-core
@@ -96,6 +96,28 @@ if [ -f data/haroclip.db ]; then
         if [ "${HAS_CAMPAIGN_COLUMN:-0}" -eq 0 ]; then
             echo "[entrypoint] migrating db: adding ingestion_jobs.campaign_context..."
             sqlite3 data/haroclip.db "ALTER TABLE ingestion_jobs ADD COLUMN campaign_context TEXT;"
+        fi
+    fi
+    if sqlite3 data/haroclip.db "SELECT name FROM sqlite_master WHERE type='table' AND name='highlight_clips';" 2>/dev/null | grep -q highlight_clips; then
+        HAS_SEGMENTS_COLUMN=$(sqlite3 data/haroclip.db "PRAGMA table_info(highlight_clips);" 2>/dev/null | grep -c "segments_json" || true)
+        if [ "${HAS_SEGMENTS_COLUMN:-0}" -eq 0 ]; then
+            echo "[entrypoint] migrating db: adding highlight_clips.segments_json..."
+            sqlite3 data/haroclip.db "ALTER TABLE highlight_clips ADD COLUMN segments_json TEXT;"
+        fi
+        # Backfill existing rows (added before jump-cut support) as a single-segment
+        # list derived from their existing start_seconds/end_seconds, so old rows
+        # remain readable by code that now expects segments_json to always be set.
+        echo "[entrypoint] backfilling highlight_clips.segments_json for pre-existing rows..."
+        sqlite3 data/haroclip.db "UPDATE highlight_clips SET segments_json = '[{\"start\": ' || start_seconds || ', \"end\": ' || end_seconds || '}]' WHERE segments_json IS NULL;"
+    fi
+    if sqlite3 data/haroclip.db "SELECT name FROM sqlite_master WHERE type='table' AND name='caption_jobs';" 2>/dev/null | grep -q caption_jobs; then
+        HAS_ASS_COLUMN=$(sqlite3 data/haroclip.db "PRAGMA table_info(caption_jobs);" 2>/dev/null | grep -c "ass_path" || true)
+        if [ "${HAS_ASS_COLUMN:-0}" -eq 0 ]; then
+            HAS_SRT_COLUMN=$(sqlite3 data/haroclip.db "PRAGMA table_info(caption_jobs);" 2>/dev/null | grep -c "srt_path" || true)
+            if [ "${HAS_SRT_COLUMN:-0}" -gt 0 ]; then
+                echo "[entrypoint] migrating db: renaming caption_jobs.srt_path -> ass_path (karaoke .ass captions, 2026-08-01)..."
+                sqlite3 data/haroclip.db "ALTER TABLE caption_jobs RENAME COLUMN srt_path TO ass_path;"
+            fi
         fi
     fi
 fi
