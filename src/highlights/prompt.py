@@ -13,9 +13,23 @@ the answer.
 - Controversial or strongly-stated opinion.
 
 Rules for choosing clip boundaries:
-- Use only the given segment timestamps as candidate cut points — never invent a \
-timestamp that falls in the middle of a segment.
-- Each clip should be between 30 and 60 seconds long in total.
+- Use the given segment start/end timestamps (shown to one decimal place) as your \
+primary reference points for where sentences and thoughts begin and end — most good \
+cut points land exactly on a segment boundary. If the true natural boundary falls \
+inside a segment's text, estimate its timestamp as precisely as you reasonably can \
+from the segment's start/end and text content; you don't need word-perfect precision \
+— your chosen timestamps will automatically be snapped to the nearest actual \
+spoken-word edge afterward, so a close, reasoned estimate is sufficient. The closer \
+your estimate, the smaller that correction, so still aim for accuracy rather than \
+treating this as a formality.
+- Each clip should be between 30 and 60 seconds long in total — treat 60 as the \
+default target ceiling, not a hard limit. If a genuinely strong idea needs more room \
+to reach its natural conclusion (punchline, payoff, answer to the question it opened) \
+rather than being cut off mid-thought, you may extend up to 75 seconds — but only for \
+that specific reason, never as a general "clips can be up to 75s now" allowance. A \
+clip must NEVER end mid-sentence or mid-thought, no matter what — if trimming filler \
+via a jump-cut still doesn't bring a genuinely important idea under 75 seconds, skip \
+that candidate entirely rather than truncating it short of its natural end.
 - Each clip must be self-contained: understandable on its own, without needing the \
 rest of the video for context.
 - Start and end on natural sentence/thought boundaries.
@@ -46,6 +60,9 @@ convincingly better — tighter, more of a hook, still flows naturally — than 
 available continuous window for the same idea.
   3. If either condition is doubtful, use one continuous segment instead. A jump-cut \
 must be justified, it is never the default equal-weight choice.
+  4. If an idea's natural start-to-end span exceeds 75 seconds even after using a \
+jump-cut to remove every genuinely-skippable chunk, do not force it into the duration \
+cap — skip the candidate. Never truncate the ending just to comply with a time limit.
 - Segments within one clip must be in chronological order and never overlap. Each \
 segment must be at least 8 seconds long. A clip may have at most 3 segments.
 - When a clip has more than one segment, the "reason" field must explicitly name what \
@@ -59,6 +76,9 @@ Output contract:
 - Each element must be: {"segments": [{"start": <float seconds>, "end": <float \
 seconds>}, ...], "reason": "<short justification of the hook, and of any jump-cut>"}. \
 "segments" has exactly 1 entry for a normal clip, or 2-3 entries for a jump-cut.
+- Your "start"/"end" values are estimates — they'll be snapped to the nearest real \
+word boundary in post-processing, so prioritize picking the right moment over hitting \
+an exact decimal.
 - Do not include markdown code fences, headings, or any prose outside the JSON array.
 
 Example output:
@@ -70,13 +90,20 @@ jumps to the payoff at 2:10 where the prediction is confirmed — the skipped pa
 unrelated to this point."}]"""
 
 
+def _format_timestamp(total_seconds: float) -> str:
+    # Deciseconds first, then divmod, so a value like 59.96 correctly carries into
+    # the next minute (mm:ss.s) instead of naively rounding to an invalid "01:60.0".
+    total_ds = round(total_seconds * 10)
+    minutes, ds_in_minute = divmod(total_ds, 600)
+    seconds = ds_in_minute / 10
+    return f"{minutes:02d}:{seconds:04.1f}"
+
+
 def format_transcript(segments: list[TranscriptSegment]) -> str:
     lines = []
     for seg in segments:
-        start_mm, start_ss = divmod(int(seg.start), 60)
-        end_mm, end_ss = divmod(int(seg.end), 60)
         lines.append(
-            f"[{start_mm:02d}:{start_ss:02d}–{end_mm:02d}:{end_ss:02d}] {seg.text}"
+            f"[{_format_timestamp(seg.start)}–{_format_timestamp(seg.end)}] {seg.text}"
         )
     return "\n".join(lines)
 

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from src.highlights.enums import HighlightStatus
 from src.highlights.exceptions import HighlightError
-from src.highlights.llm import generate_candidates, parse_candidates
+from src.highlights.llm import generate_candidates, parse_candidates, snap_candidates
 from src.highlights.models import HighlightClip, HighlightJob
 from src.highlights.storage import clip_job_dir
 from src.ingestion.models import IngestionJob
@@ -107,6 +107,7 @@ def run_highlight_detection(
             db.commit()
 
         candidates = parse_candidates(raw_response, video_duration, logger=logger)
+        candidates = snap_candidates(candidates, segments, video_duration, logger=logger)
 
         db.query(HighlightClip).filter_by(highlight_job_id=job.id).delete()
         db.commit()
@@ -116,11 +117,11 @@ def run_highlight_detection(
 
         dest_dir = clip_job_dir(ingestion_job_id)
         for rank, candidate in enumerate(candidates, start=1):
-            segments = candidate["segments"]
+            clip_segments = candidate["segments"]
             out_path = dest_dir / f"clip_{rank:02d}.mp4"
             render_start = time.monotonic()
-            render_clip(video_path, [(s["start"], s["end"]) for s in segments], out_path)
-            span = " + ".join(f"[{s['start']:.1f}-{s['end']:.1f}]" for s in segments)
+            render_clip(video_path, [(s["start"], s["end"]) for s in clip_segments], out_path)
+            span = " + ".join(f"[{s['start']:.1f}-{s['end']:.1f}]" for s in clip_segments)
             logger.info(
                 "clip #%d rendered in %.1fs: %s -> %s",
                 rank, time.monotonic() - render_start, span, out_path.name,
@@ -129,9 +130,9 @@ def run_highlight_detection(
                 HighlightClip(
                     highlight_job_id=job.id,
                     rank=rank,
-                    segments_json=json.dumps(segments),
-                    start_seconds=segments[0]["start"],
-                    end_seconds=segments[-1]["end"],
+                    segments_json=json.dumps(clip_segments),
+                    start_seconds=clip_segments[0]["start"],
+                    end_seconds=clip_segments[-1]["end"],
                     reason=candidate["reason"],
                     output_path=str(out_path.relative_to(DATA_DIR)),
                 )

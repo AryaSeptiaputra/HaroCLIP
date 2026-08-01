@@ -6,7 +6,7 @@ import time
 
 from src.highlights.exceptions import HighlightError
 from src.highlights.prompt import build_messages
-from src.transcription.schemas import TranscriptSegment
+from src.transcription.schemas import TranscriptSegment, TranscriptWord
 
 LLM_MODEL_NAME = os.getenv("HIGHLIGHT_LLM_MODEL", "claude-sonnet-5")
 # claude-sonnet-5 runs adaptive thinking by default when `thinking` is omitted, and
@@ -17,11 +17,23 @@ LLM_MODEL_NAME = os.getenv("HIGHLIGHT_LLM_MODEL", "claude-sonnet-5")
 MAX_NEW_TOKENS = 8192
 MAX_CANDIDATES = 10
 MIN_CLIP_SECONDS = 30
-MAX_CLIP_SECONDS = 60
+# 60 remains the default/target ceiling (see prompt.py's duration rule); 75 is a
+# deliberate stretch allowance so Claude isn't forced to truncate a genuinely strong
+# idea mid-thought just to hit 60 — not a general widening of the target range.
+MAX_CLIP_SECONDS = 75
 # Jump-cut clips (>1 segment): kept conservative so stitched clips still feel like one
 # coherent moment rather than a choppy compilation — see prompt.py's "Jump-cuts" rules.
 MAX_SEGMENTS_PER_CLIP = 3
 MIN_SEGMENT_SECONDS = 8
+
+# Bounded search radius (seconds) for word-boundary snapping around Claude's raw
+# start/end guess. With segment timestamps now shown to Claude at 1-decimal precision
+# (prompt.py), most cuts landing on an actual segment boundary should already be close;
+# this window mainly catches genuinely mid-segment sentence-boundary estimates, which
+# are inherently interpolated and can be off by more. Not yet tuned against a real
+# transcript (no local GPU — see CLAUDE.md's highlights-module verification caveat);
+# revisit after a real vast.ai run if snaps are observed landing on the wrong word.
+SNAP_WINDOW_SECONDS = 2.0
 
 JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
@@ -190,3 +202,121 @@ def parse_candidates(
         )
 
     return valid[:MAX_CANDIDATES]
+
+
+def _snap_edge(
+    raw_value: float,
+    words: list[TranscriptWord],
+    edge: str,
+    window: float,
+    logger: logging.Logger | None = None,
+) -> float:
+    """Snap a candidate's raw start/end to the nearest real word boundary within
+    +/- window seconds. "start" always snaps to some word's own start, "end" always
+    snaps to some word's own end (never the opposite) — this guarantees the word at
+    the cut point is either fully included or fully excluded, never split in half.
+    Falls back to the raw value (with a warning, not a rejection) if no word boundary
+    falls within the window — an empty window can be a legitimate situation (e.g. a
+    clip starting right as speech resumes after a silence/music intro), so this is
+    surfaced for manual spot-check rather than treated as an error.
+    """
+    attr = "start" if edge == "start" else "end"
+    nearby = [
+        getattr(w, attr) for w in words
+        if raw_value - window <= getattr(w, attr) <= raw_value + window
+    ]
+    if not nearby:
+        if logger:
+            logger.warning(
+                "snap: no word %s within %.1fs of raw %s=%.2f — keeping raw value",
+                attr, window, edge, raw_value,
+            )
+        return raw_value
+    return min(nearby, key=lambda v: abs(v - raw_value))
+
+
+def snap_candidates(
+    candidates: list[dict],
+    transcript_segments: list[TranscriptSegment],
+    video_duration: float,
+    logger: logging.Logger | None = None,
+) -> list[dict]:
+    """Corrects parse_candidates' output by snapping each segment's start/end to the
+    nearest real TranscriptWord boundary, then re-validates exactly as parse_candidates
+    did (range/min-length/chronology/total-duration) since snapping can shift a
+    segment enough to fail one of those checks. This is what guarantees the final cut
+    never lands mid-word, regardless of how close Claude's own guess was.
+    """
+    all_words: list[TranscriptWord] = sorted(
+        (w for seg in transcript_segments for w in seg.words),
+        key=lambda w: w.start,
+    )
+
+    snapped: list[dict] = []
+    for i, candidate in enumerate(candidates):
+        segments: list[tuple[float, float]] = []
+        segments_valid = True
+        for seg in candidate["segments"]:
+            snapped_start = _snap_edge(
+                seg["start"], all_words, "start", SNAP_WINDOW_SECONDS, logger
+            )
+            snapped_end = _snap_edge(
+                seg["end"], all_words, "end", SNAP_WINDOW_SECONDS, logger
+            )
+
+            if not (0 <= snapped_start < snapped_end <= video_duration):
+                segments_valid = False
+                if logger:
+                    logger.info(
+                        "candidate #%d rejected after snapping: segment out of range "
+                        "(start=%.2f end=%.2f video_duration=%.1f)",
+                        i, snapped_start, snapped_end, video_duration,
+                    )
+                break
+            if snapped_end - snapped_start < MIN_SEGMENT_SECONDS:
+                segments_valid = False
+                if logger:
+                    logger.info(
+                        "candidate #%d rejected after snapping: segment length %.1fs "
+                        "below minimum %ds",
+                        i, snapped_end - snapped_start, MIN_SEGMENT_SECONDS,
+                    )
+                break
+            segments.append((snapped_start, snapped_end))
+        if not segments_valid:
+            continue
+
+        if any(segments[j][1] > segments[j + 1][0] for j in range(len(segments) - 1)):
+            if logger:
+                logger.info(
+                    "candidate #%d rejected after snapping: segments not "
+                    "chronological/non-overlapping (%r)", i, segments,
+                )
+            continue
+
+        total_seconds = sum(e - s for s, e in segments)
+        if not (MIN_CLIP_SECONDS <= total_seconds <= MAX_CLIP_SECONDS):
+            if logger:
+                logger.info(
+                    "candidate #%d rejected after snapping: total clip length %.1fs "
+                    "outside [%d, %d]", i, total_seconds, MIN_CLIP_SECONDS, MAX_CLIP_SECONDS,
+                )
+            continue
+
+        snapped.append({
+            "segments": [{"start": s, "end": e} for s, e in segments],
+            "reason": candidate["reason"],
+        })
+
+    if logger:
+        logger.info("%d/%d candidates survived snapping", len(snapped), len(candidates))
+        for v in snapped:
+            span = " + ".join(f"[{s['start']:.1f}-{s['end']:.1f}]" for s in v["segments"])
+            logger.info("  %s %s", span, v["reason"])
+
+    if not snapped:
+        raise HighlightError(
+            "no valid highlight candidates survived snapping", stage="detection"
+        )
+
+    return snapped

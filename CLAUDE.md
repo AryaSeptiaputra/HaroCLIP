@@ -443,6 +443,100 @@ design-only discussion, per user direction — no code was written for it. Findi
   evaluation above is. Reopen only on a future explicit user request, not on the
   assistant's own judgment that a trigger condition has been reached.
 
+**Highlight clip cut-in/cut-out precision fixed, duration cap loosened 60→75s
+(2026-08-01).** Prompted by real user-observed clips cutting in or out mid-sentence,
+sometimes ruining caption timing. Root cause traced to two independent gaps, neither
+previously caught since this stage has no real-footage verification yet (see
+highlights-module verification caveat below):
+
+- **Timestamp precision gap**: `format_transcript()` (`src/highlights/prompt.py`)
+  showed Claude segment timestamps truncated to whole seconds (`int(seg.start)`) via
+  `mm:ss` formatting, while the output contract asked Claude to return float-precision
+  cuts — so Claude's returned decimals were effectively guesses, not real word/sentence
+  edges. Meanwhile `parse_candidates` (`src/highlights/llm.py`) never cross-checked
+  those timestamps against the word-level `TranscriptWord` data already produced by
+  transcription (used by captioning, but previously unused in the highlight-detection
+  path) — whatever float Claude returned was used as-is for both the ffmpeg cut
+  (`render_clip`) and caption word-slicing (`slice_words_to_clip`), which explains both
+  symptoms: a cut landing after a word's true onset produces a mid-word video cut, and
+  landing after a word's `.end` makes `slice_words_to_clip` drop that word from
+  captions entirely (`word.end <= seg_start` → skipped, not clamped).
+- **Duration gate had no accommodation for long ideas**: `parse_candidates` rejected
+  (silently dropped, no trim/extend) any candidate whose total duration fell outside
+  the hard `[30, 60]` window — an idea that genuinely needed more than 60s either got
+  forced into an unnatural mid-thought truncation by the LLM, or its candidate was
+  dropped.
+
+**Fix, split into the two pieces above (user-decided direction — precision fixed via
+both prompt improvement AND code-side snapping, not either alone; duration capped
+raised rather than kept strict):**
+- `format_transcript()` now shows 1-decimal-second precision via a new
+  `_format_timestamp()` helper (deciseconds-first divmod, avoids a carry bug where a
+  naive round of e.g. `59.96` would render the invalid `"01:60.0"` instead of
+  `"02:00.0"`). The system prompt (`src/highlights/prompt.py`) was reworded to tell
+  Claude explicitly that its start/end are estimates which get snapped to a real word
+  boundary afterward — it should still aim for accuracy (smaller correction), but
+  doesn't need word-perfect precision, resolving the prior tension between "use only
+  segment timestamps as cut points" and "start/end on natural sentence boundaries"
+  (sentence boundaries often fall mid-segment).
+- **New `snap_candidates()` in `src/highlights/llm.py`**, called from
+  `src/highlights/service.py` right after `parse_candidates` and before persistence/
+  rendering: flattens all `TranscriptWord`s across the transcript, and for each
+  candidate segment snaps `start` to the nearest word **start** and `end` to the
+  nearest word **end** within a `SNAP_WINDOW_SECONDS = 2.0` search radius (deliberately
+  asymmetric — start never snaps to a word's end or vice versa — so the word at a cut
+  point is always either fully included or fully excluded, never split in half). Falls
+  back to Claude's raw value (with a `logger.warning`, not a rejection) if no word
+  falls within the window — treated as a possibly-legitimate situation (e.g. a clip
+  starting right as speech resumes after silence) worth a manual spot-check flag,
+  not an automatic failure. After snapping, each candidate is re-validated with the
+  exact same checks `parse_candidates` already does (range, `MIN_SEGMENT_SECONDS`,
+  chronological/non-overlap, total duration) since snapping can shift a segment enough
+  to fail one of them — a candidate that fails re-validation is dropped (logged), never
+  raised mid-loop; `HighlightError` only raises if the whole result ends up empty, same
+  contract as `parse_candidates`. Works per-segment independently for jump-cut clips
+  (up to 3 non-contiguous segments), searching the full flattened word list each time
+  rather than scoping to "its own" transcript segment.
+- **`MAX_CLIP_SECONDS` raised from 60 to 75** (`src/highlights/llm.py`) — 60 remains the
+  default/target ceiling per the prompt's duration rule, 75 is a deliberate stretch
+  allowance specifically so a genuinely strong idea isn't forced into a mid-thought
+  truncation just to hit 60s. Prompt rules were strengthened to make "never end
+  mid-sentence/mid-thought" unconditional: if an idea still doesn't fit in 75s even
+  after trimming filler via a jump-cut, the candidate must be skipped entirely rather
+  than truncated — added as a 4th bullet to the jump-cut "Decision order" list.
+  `MIN_CLIP_SECONDS` (30), `MIN_SEGMENT_SECONDS` (8), and `MAX_SEGMENTS_PER_CLIP` (3)
+  are unchanged — out of scope for this fix.
+- **No changes to `src/rendering/clipper.py`, `src/captioning/subtitles.py`,
+  `src/reframe/`, or `HighlightClip`'s schema** — the fix happens entirely upstream of
+  these; snapped floats flow through the exact same plumbing (`segments_json`, etc.)
+  that already existed, with no shape change and no migration needed. One incidental
+  cleanup bundled into the same edit: `service.py`'s per-clip render loop reused the
+  variable name `segments` (candidate's clip segments) shadowing the outer transcript
+  `segments` variable — harmless before this change (nothing after read the outer one
+  again), but risky now that `snap_candidates` is a second consumer of the transcript
+  `segments` right before the loop; renamed the loop variable to `clip_segments`
+  (matches `slice_words_to_clip`'s own parameter name for the same concept).
+
+**Verified locally** (no local CUDA GPU — same ad hoc hand-written-fixture pattern as
+the rest of this module's verification): `_snap_edge` against a hand-built
+`TranscriptWord` fixture confirms start snaps only to word starts and end only to word
+ends (not the opposite edge) even when a raw value sits closer to an adjacent word's
+opposite-type boundary; a jump-cut candidate's two segments snap independently against
+the full word list; a raw value with no word within the window falls back to the raw
+value with a warning logged; a candidate that becomes invalid after snapping (segment
+shrinks below `MIN_SEGMENT_SECONDS`) is dropped while a separate valid candidate in the
+same batch survives; a 68s single-segment candidate is now accepted by
+`parse_candidates` (previously rejected under the old 60s cap) while an 80s candidate
+is still rejected under the new 75s cap; `_format_timestamp`/`format_transcript`
+produce correct decimal output including the `59.96` carry-into-next-minute edge case;
+existing `parse_candidates` rejection paths (too-short segment, mixed valid/invalid
+candidates) re-checked to confirm the `MAX_CLIP_SECONDS` bump didn't affect them.
+**Not yet verified**: actual snap behavior against a real transcript's real
+word-boundary timing noise, and whether Claude's cut choices actually improve in
+practice now that it sees decimal-precision timestamps and knows about the snap
+safety net — both need a real vast.ai run, same caveat as highlight-detection quality
+generally (see below).
+
 **Real Light-ASD is vendored** (`src/detection/light_asd/`, MIT-licensed, upstream
 `github.com/Junhua-Liao/Light-ASD`, attribution + deviations documented in
 `src/detection/light_asd/NOTICE.md`) — fetched verbatim from the real upstream source
@@ -607,9 +701,10 @@ surfaced the context-window bug described above (highlight-detection LLM stage).
 by switching to the Claude API (2026-07-26) plus quality upgrades (whisper `float16`,
 YOLOv8-face `medium`, later `xlarge`) using the VRAM the local LLM no longer needs.
 **Captioning, the further YOLOv8-face `xlarge`/`imgsz=1280`/whisper `vad_filter`
-pass (also 2026-07-26), jump-cut clip support, and the karaoke-caption/reframe-encode
-rewrite (both 2026-08-01) are new since that run and have never been exercised on
-vast.ai at all.** None of this is yet re-verified with a real run — that's next:
+pass (also 2026-07-26), jump-cut clip support, the karaoke-caption/reframe-encode
+rewrite, and the clip-boundary snapping/duration-cap fix (all 2026-08-01) are new
+since that run and have never been exercised on vast.ai at all.** None of this is yet
+re-verified with a real run — that's next:
 
 1. Re-run the full pipeline end-to-end on vast.ai with the current code
    (`vast-ai-e2e-prep` branch, updated `VAST_GUIDE.md`): confirm the Claude API
@@ -632,7 +727,14 @@ vast.ai at all.** None of this is yet re-verified with a real run — that's nex
    timestamps) and that `MarginV=260` actually clears the real TikTok/Reels/Shorts
    apps' UI when viewed on an actual phone, not just the raw frame edge; confirm
    `CROP_CRF=17`'s real encode-time cost on production-length clips fits comfortably
-   under the reframe stage's new 600s timeout on the rented GPU instance's CPU.
+   under the reframe stage's new 600s timeout on the rented GPU instance's CPU;
+   confirm the new word-boundary snapping (`snap_candidates` in
+   `src/highlights/llm.py`) actually lands clips/captions on clean word edges against
+   real transcript timing noise (only verified against hand-written fixtures so far),
+   that `SNAP_WINDOW_SECONDS=2.0` is wide enough in practice (watch for repeated
+   `snap: no word ... within 2.0s` warnings in the logs — a sign the window needs
+   widening), and that clips using the new 61-75s stretch room actually read as
+   complete thoughts rather than padded.
 2. Get a real short face+speech test clip (e.g. a webcam recording) to close the one
    remaining local-verification gap: actual YOLOv8-face/ByteTrack/Light-ASD behavior
    against real content, still only checked for "doesn't crash" against a synthetic
