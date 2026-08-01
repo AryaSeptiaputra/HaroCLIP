@@ -9,7 +9,11 @@ class FaceTracker:
         # supervision.ByteTrack — note: newer supervision releases deprecate
         # update_with_detections() in favor of a standalone `trackers` package's
         # update(); we're pinned to this API since it's what CLAUDE.md documents.
-        self._tracker = sv.ByteTrack()
+        # minimum_consecutive_frames=2 (default 1): filters a track that only ever
+        # showed up in a single sampled frame -- a flicker/false-positive-adjacent
+        # detection, more common the more faces are on screen -- before it's
+        # treated as "activated" and pollutes speaker-selection candidates.
+        self._tracker = sv.ByteTrack(minimum_consecutive_frames=2)
         self._sv = sv
 
     def update(self, frame_index: int, boxes: list[FaceBox]) -> list[TrackedFace]:

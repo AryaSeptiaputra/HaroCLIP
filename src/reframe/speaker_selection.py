@@ -3,12 +3,11 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.reframe.asd_scoring import MIN_TRACK_SAMPLES as ASD_MIN_TRACK_SAMPLES
 from src.reframe.track_continuity import split_into_segments
 from src.tracking.schemas import TrackedFace
 
 module_logger = logging.getLogger(__name__)
-
-ASD_MIN_TRACK_SAMPLES = 3
 
 
 @dataclass
@@ -45,6 +44,32 @@ def _heuristic_fallback(tracks: list[TrackedFace], log: logging.Logger) -> list[
     if track_id is None:
         return []
     return [t for t in tracks if t.track_id == track_id]
+
+
+def _segment_heuristic_fallback(
+    segments: list["TrackSegment"], log: logging.Logger
+) -> list[TrackedFace]:
+    """Continuity-aware version of _heuristic_fallback: picks the single best
+    TrackSegment by cumulative bbox area (tie-broken by sample count), never a
+    raw/unsplit track_id. Guaranteed non-empty whenever `segments` is non-empty,
+    which _build_segments guarantees whenever the source `tracks` was non-empty
+    (every track_id produces >=1 segment even with zero discontinuities) -- this
+    is what keeps build_crop_path() from being handed an empty list (and thus
+    freeze-centering) just because no individual segment cleared the ASD
+    eligibility floor, which becomes common once a scene has 3+ people.
+    """
+    if not segments:
+        return []
+
+    def _area(seg: "TrackSegment") -> float:
+        return sum((b.x2 - b.x1) * (b.y2 - b.y1) for b in seg.boxes)
+
+    best = max(segments, key=lambda s: (_area(s), len(s.boxes)))
+    log.info(
+        "method=segment-heuristic track_id=%s segment=%s samples=%d",
+        best.track_id, best.segment_index, len(best.boxes),
+    )
+    return best.boxes
 
 
 def _build_segments(tracks: list[TrackedFace], fps: float, log: logging.Logger) -> list[TrackSegment]:
@@ -92,26 +117,32 @@ def select_primary_track_with_asd(
     """
     log = logger or module_logger
     if not tracks:
+        log.info("method=none reason=no face tracks detected in clip")
         return []
+
+    segments = _build_segments(tracks, source_fps, log)
 
     try:
         from src.reframe.asd_scoring import LightASDScorer
     except ImportError:
-        log.info("method=heuristic reason=Light-ASD dependencies not available (ImportError)")
-        return _heuristic_fallback(tracks, log)
-
-    segments = _build_segments(tracks, source_fps, log)
+        log.info("reason=Light-ASD dependencies not available (ImportError)")
+        return _segment_heuristic_fallback(segments, log)
 
     candidates = [seg for seg in segments if len(seg.boxes) >= ASD_MIN_TRACK_SAMPLES]
+    log.info(
+        "segment summary: %d raw tracks -> %d continuity segments (%d/%d eligible for ASD, floor=%d)",
+        len({s.track_id for s in segments}), len(segments),
+        len(candidates), len(segments), ASD_MIN_TRACK_SAMPLES,
+    )
     if not candidates:
-        log.info("method=heuristic reason=no track segment has enough samples for ASD scoring")
-        return _heuristic_fallback(tracks, log)
+        log.info("reason=no track segment has enough samples for ASD scoring")
+        return _segment_heuristic_fallback(segments, log)
 
     try:
         scorer = LightASDScorer(logger=log)
     except Exception:
-        log.exception("method=heuristic reason=failed to load Light-ASD model")
-        return _heuristic_fallback(tracks, log)
+        log.exception("reason=failed to load Light-ASD model")
+        return _segment_heuristic_fallback(segments, log)
 
     try:
         best_segment, best_score = None, float("-inf")
@@ -130,10 +161,14 @@ def select_primary_track_with_asd(
             if mean_score > best_score:
                 best_segment, best_score = seg, mean_score
 
+        log.info(
+            "ASD segment scoring: %d/%d candidate segments produced a usable score",
+            len(all_scores), len(candidates),
+        )
         log.info("Light-ASD scores per track segment: %s", all_scores)
         if best_segment is None:
-            log.info("method=heuristic reason=no track segment produced a usable ASD score")
-            return _heuristic_fallback(tracks, log)
+            log.info("reason=no track segment produced a usable ASD score")
+            return _segment_heuristic_fallback(segments, log)
         log.info(
             "method=light-asd track_id=%s segment=%s score=%.3f",
             best_segment.track_id, best_segment.segment_index, best_score,

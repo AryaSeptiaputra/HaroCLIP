@@ -1239,6 +1239,183 @@ ByteTrack ID switches, which affects whether the per-segment
 `ASD_MIN_TRACK_SAMPLES` filter is too aggressive or not aggressive enough in
 practice.
 
+**Reframe crop freeze/center-lock on 3+-person podcast footage fixed —
+segment-level fallback tier added, ByteTrack/threshold levers considered and
+mostly rejected (2026-08-01).** Real user report, same day as the
+two-person crop-drift fix above: on a podcast-format video with more than 2
+people on screen, almost all generated clips showed the crop **frozen/
+centered in the middle of the frame** for stretches instead of following any
+speaker — user-confirmed symptom (not "locks onto the wrong person").
+
+Root cause, traced by direct code reading: `build_crop_path()`
+(`src/reframe/crop_path.py:31-33`) freeze-centers only when the
+`primary_track_boxes` it receives is **empty**. Tracing upward,
+`select_primary_track_with_asd()` (`src/reframe/speaker_selection.py`) had 4
+fallback branches (Light-ASD `ImportError`, no segment clears the sample
+floor, model-load failure, no segment produces a usable score), and **all
+four** collapsed to `_heuristic_fallback(tracks, log)` — the **raw, unsplit,
+whole-`track_id`** heuristic, discarding the continuity-segment work
+entirely. The critical line: `candidates = [seg for seg in segments if
+len(seg.boxes) >= ASD_MIN_TRACK_SAMPLES]` (`ASD_MIN_TRACK_SAMPLES = 3`) —
+each individual continuity *segment* (not whole track) needs ≥3 samples
+(≥0.6s unbroken same-identity tracking at `SAMPLE_FPS=5`) before it's even
+eligible for ASD scoring. With 3+ people in frame, more ByteTrack ID churn
+(more IoU-association ambiguity with more simultaneous close faces) and/or
+more `track_continuity.py` splits produce many short segments, so most/all
+candidates fail the floor — and once none clear it, the code fell back to
+the **raw track**, which in a crowded scene can itself be short/fragmented
+enough to end up empty by the time it reaches `build_crop_path()`.
+
+**Real evidence, not just theory**: the actual vast.ai run's `reframe.log`
+(`data/VAST/logs/logs/dc4fbe55-d897-45ae-90c0-0885a0a70f62/reframe.log`,
+predates this fix and the two-person crop-drift fix — old whole-track
+`method=light-asd track_id=X score=Y` log format, no segment splitting yet)
+shows **11 to 28 unique ByteTrack IDs per individual highlight clip** across
+all 11 clips of that video — direct confirmation this is a heavily
+multi-person/high-ID-churn video, exactly the regime where a per-segment
+3-sample floor with no intermediate fallback tier starves candidates. (That
+old run never actually froze — the pre-fix code scored whole raw tracks
+directly with no segment floor — which is itself informative: the freeze
+risk was introduced by today's earlier segment-splitting fix, not
+pre-existing, and this second fix closes the gap it opened.)
+
+**One correction to the initial hypothesis, made after reading the code
+rather than assumed**: the claim that `MAX_JUMP_PX_PER_SEC` "over-triggers"
+in crowded scenes is not clearly true and may run backwards — in a crowded
+frame, people sit physically closer together on screen, so a real
+undetected ID switch between two adjacent people produces a **smaller**
+pixel jump than in a tight two-person close-up, i.e. crowding plausibly
+makes the existing threshold *less* likely to catch a real switch
+(under-splitting), not more likely to false-trigger on legitimate motion.
+The genuinely solid part of the hypothesis is downstream: the per-segment
+sample floor plus a fallback that discards segmentation entirely.
+
+Decisions, lever by lever (targeted-fix scope only, per explicit user
+direction — a rearchitecture toward dynamic multi-speaker-follow-within-one-
+clip was explicitly declined as a separate future item, not bundled here):
+
+- **`src/tracking/face_tracker.py`**: `sv.ByteTrack()` → `sv.ByteTrack(
+  minimum_consecutive_frames=2)` — the one change made. Filters a track that
+  only ever appeared in a single sampled frame (a flicker, more likely with
+  more faces on screen) before it counts as "activated," at zero cost to a
+  real speaker candidate (persists for seconds, not one sample).
+  `track_activation_threshold` (already moot — `FaceDetector.
+  CONFIDENCE_THRESHOLD=0.5` already exceeds both it and the derived
+  `det_thresh`), `minimum_matching_threshold` (0.8 is upstream ByteTrack's
+  own validated value, including on MOT20, a genuinely dense-crowd
+  benchmark — already tuned for this), and `lost_track_buffer`/`frame_rate`
+  (default 30/30 against 5fps-sampled calls gives ~6s of real occlusion
+  tolerance, which *helps* in a crowded scene's frequent mutual occlusion;
+  "fixing" the unit mismatch to `frame_rate=5` would shrink that to ~1s, a
+  real regression with no offsetting benefit) were all considered and
+  explicitly left unchanged, not overlooked.
+- **`MAX_JUMP_PX_PER_SEC` (`src/reframe/track_continuity.py`): unchanged.**
+  Raising it risks reopening the under-splitting bug the two-person fix
+  documented as a known limitation (more likely, not less, in a crowded
+  frame per the correction above); lowering it risks over-splitting on
+  legitimate fast motion; scaling it by concurrent-track-count was
+  considered but rejected — no local ground truth to determine which
+  direction is net-beneficial. Made low-stakes by the fix below: whether a
+  track splits into 2 segments or 6, the new fallback tier guarantees a
+  real, non-empty, largest-known-face segment is used either way.
+- **`src/reframe/speaker_selection.py` (the actual fix)**: `segments =
+  _build_segments(tracks, source_fps, log)` now built once near the top of
+  `select_primary_track_with_asd()` — right after the `if not tracks: return
+  []` guard, before the `LightASDScorer` import attempt, so it's available
+  to *every* fallback branch including the `ImportError` one (previously
+  skipped continuity-splitting entirely, a separate robustness gap closed
+  for free here). New `_segment_heuristic_fallback(segments, log)`: picks
+  the single best `TrackSegment` by cumulative bbox area (tie-broken by
+  sample count) — never a raw/unsplit track_id — and is guaranteed
+  non-empty whenever `segments` is non-empty, which `_build_segments`
+  guarantees whenever the source `tracks` list was non-empty (every
+  `track_id` yields ≥1 segment even with zero discontinuities). All 4
+  `_heuristic_fallback(tracks, log)` call sites inside
+  `select_primary_track_with_asd` now call `_segment_heuristic_fallback(
+  segments, log)` instead. `select_primary_track()`/`_heuristic_fallback()`
+  (the raw-track versions) are kept, unremoved — still meaningful as a
+  standalone documented heuristic — just no longer reached from this
+  function's fallback chain. Net effect: `primary_track_boxes` reaching
+  `build_crop_path()` is now empty only when **zero faces were detected
+  anywhere in the clip**, not merely "no segment happened to clear the ASD
+  eligibility floor."
+- **Constant unification**: the duplicate `ASD_MIN_TRACK_SAMPLES = 3` in
+  `speaker_selection.py` is gone, replaced with `from src.reframe.asd_scoring
+  import MIN_TRACK_SAMPLES as ASD_MIN_TRACK_SAMPLES` — canonical definition
+  stays in `asd_scoring.py` (the module that actually enforces it physically
+  against Light-ASD's MFCC/visual windowing). Safe to import at module level:
+  `asd_scoring.py` has no `torch`/`python_speech_features` at its own
+  top-level (those stay lazily imported inside `LightASDScorer`), so this
+  can't trigger the `ImportError` the existing lazy-import pattern guards
+  against. The value itself (3) is unchanged — it's a model-input-validity
+  floor, a different concern from "is there a usable segment at all," which
+  the new fallback tier now handles independently.
+- **`src/reframe/crop_path.py`: unchanged.** With the fallback tier above,
+  the freeze-center branch is reachable only when genuinely zero faces
+  exist in the clip — there's no "largest-known face position" to prefer
+  over dead-center in that state, so touching this file now would only mask
+  a symptom that no longer has a real cause. One residual, explicitly
+  out-of-scope gap: if the selected segment covers only a fraction of the
+  clip, `np.interp`'s edge-hold still freezes the crop at that segment's
+  boundary value for frames outside its span — pre-existing "freeze-pan"
+  behavior from before this fix; improving it would mean blending across
+  multiple speaker segments over time, which is exactly the
+  dynamic-multi-speaker-follow rearchitecture the user already declined to
+  scope into this fix.
+- **New logging** (`speaker_selection.py`): `method=none reason=no face
+  tracks detected in clip` on the previously-silent `if not tracks: return
+  []` path; the new fallback tagged `method=segment-heuristic` (distinct
+  from the old `method=heuristic` tag still used by the untouched
+  `select_primary_track()`/`_heuristic_fallback()` pair) so a real run's log
+  can tell "no eligible segment, fell back to largest-known-face segment"
+  apart from the old whole-track heuristic; a `segment summary: %d raw
+  tracks -> %d continuity segments (%d/%d eligible for ASD, floor=%d)` line
+  right after `_build_segments` to directly confirm/deny the fragmentation
+  hypothesis from real logs; an `ASD segment scoring: %d/%d candidate
+  segments produced a usable score` aggregate in the scoring loop, closing
+  the prior gap where individual segment-scoring failures were logged one at
+  a time with no summary.
+
+**Verified locally** (hand-built fixtures, no CUDA GPU, no real
+multi-person footage — same limitation as the rest of this module; scripts
+run ad hoc against the project venv, this project has no committed pytest
+suite): a synthetic 3-track, heavily-fragmented fixture (every segment under
+`ASD_MIN_TRACK_SAMPLES=3`) confirmed `select_primary_track_with_asd` returns
+a non-empty result equal to the largest-area segment's boxes, both via the
+natural "no eligible candidates" path and via a forced `ImportError` on
+`LightASDScorer` (both previously would have exercised the raw-track
+fallback); a single-unfragmented-track fixture and a two-clean-track
+(no-discontinuity) fixture both confirmed **identical selection output**
+before and after this change (regression safety, since 3 of the 4 fallback
+call sites now call a different function); the "no track segment produced a
+usable ASD score" branch was exercised for real (not mocked) via a fixture
+whose lone segment cleared the sample floor but had no real video to score
+against, correctly falling through to `_segment_heuristic_fallback`;
+`ASD_MIN_TRACK_SAMPLES is asd_scoring.MIN_TRACK_SAMPLES` confirmed as the
+same object; `FaceTracker(minimum_consecutive_frames=2)` against the real
+locally-installed `supervision==0.29.1` confirmed a single-sample flicker
+never appears in `update()`'s output at all, while a persistent multi-frame
+face still activates and keeps exactly one `track_id` throughout (no
+spurious re-activation), and the existing "empty detections doesn't crash"
+smoke test still passes; the full `_detect_and_track` →
+`select_primary_track_with_asd` → `build_crop_path` chain re-run end-to-end
+against a synthetic zero-face clip confirmed the `method=none` log line
+fires and the expected (correct, since genuinely no faces exist) dead-center
+freeze fallback still triggers, with no crash and no signature-mismatch
+against `src/reframe/service.py`'s unchanged call sites.
+
+**Not yet verified, needs a real vast.ai run with real 3+-person footage**
+(same caveat category as the rest of this module): whether
+`method=segment-heuristic` actually fires on real 3+-person clips and how
+often (watch the log line introduced above); whether the crop visibly stops
+freezing dead-center on those clips; whether `MAX_JUMP_PX_PER_SEC=1800.0`
+still shows evidence of under- or over-splitting on genuinely crowded real
+footage (same open item carried over from the two-person fix, now more
+directly relevant given the 11-28-tracks-per-clip real evidence above);
+whether the segment-heuristic tier's area-based pick (no active-speaker
+signal at all) is a visually reasonable "primary speaker" choice in
+practice, versus a real Light-ASD-scored segment.
+
 **Light-ASD re-evaluated against newer ASD models, per explicit user request
 after the crop-drift fix above — kept as-is, shelved not reopened
 (2026-08-01).** User asked whether a stronger ASD model exists worth a small
@@ -1334,7 +1511,15 @@ re-verified with a real run — that's next:
    `MAX_JUMP_PX_PER_SEC=1800.0` needs retuning (watch for either missed
    switches — crop still drifting between two people — or over-triggering on
    fast legitimate head motion, logged via the "Light-ASD scores per track
-   segment" / "method=heuristic" log lines).
+   segment" / "method=heuristic" log lines); confirm the 2026-08-01
+   crop-freeze/center-lock fix (the new `_segment_heuristic_fallback` tier and
+   `FaceTracker(minimum_consecutive_frames=2)` in `speaker_selection.py`/
+   `face_tracker.py`) actually stops the dead-center freeze on real
+   3+-person podcast footage — watch for `method=segment-heuristic` and the
+   `segment summary: ... eligible for ASD ...` log lines to confirm how often
+   the ASD-eligible floor is actually being missed in practice, and whether
+   the area-based segment pick (no active-speaker signal) still produces a
+   visually reasonable crop compared to a real Light-ASD-scored segment.
 2. Get a real short face+speech test clip (e.g. a webcam recording) to close the one
    remaining local-verification gap: actual YOLOv8-face/ByteTrack/Light-ASD behavior
    against real content, still only checked for "doesn't crash" against a synthetic
