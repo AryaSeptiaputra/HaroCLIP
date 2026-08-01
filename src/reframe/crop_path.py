@@ -25,32 +25,76 @@ def build_crop_path(
     fps: float,
     smoothing_window: int = DEFAULT_SMOOTHING_WINDOW,
 ) -> list[tuple[int, int]]:
+    """Thin wrapper kept for any caller still passing a single flat box list
+    (today's whole-clip selection is just the degenerate one-window case) --
+    produces byte-identical output to build_crop_path_from_windows given one
+    window spanning [0, total_frames).
+    """
+    from src.reframe.speaker_selection import SpeakerWindow
+
+    window = SpeakerWindow(
+        start_frame=0, end_frame=total_frames,
+        track_id=None, segment_index=None, boxes=primary_track_boxes,
+    )
+    return build_crop_path_from_windows(
+        [window], source_width, source_height, total_frames, fps, smoothing_window
+    )
+
+
+def build_crop_path_from_windows(
+    windows: list["SpeakerWindow"],
+    source_width: int,
+    source_height: int,
+    total_frames: int,
+    fps: float,
+    smoothing_window: int = DEFAULT_SMOOTHING_WINDOW,
+) -> list[tuple[int, int]]:
+    """Generalizes the old single-track build_crop_path to a sequence of
+    SpeakerWindows: each window is interpolated independently (including its
+    own internal continuity-break detection via _interpolate_with_segment_breaks,
+    same defense-in-depth as before -- a window's boxes normally already come
+    from one continuity-clean TrackSegment, so this is usually a no-op, but
+    stays in place for any caller that hands in unsplit boxes), then masked
+    into only that window's own [start_frame, end_frame) span -- so a
+    window's own edge-hold/extrapolation never bleeds into a neighboring
+    window, giving a hard cut at every window boundary (speaker switches, not
+    just the pre-existing intra-track discontinuities).
+    """
     crop_w = compute_crop_width(source_width, source_height)
     max_x = max(source_width - crop_w, 0)
 
-    if not primary_track_boxes:
+    if not any(w.boxes for w in windows):
         center_x = max_x // 2
         return [(center_x, 0)] * total_frames
 
-    samples = sorted(primary_track_boxes, key=lambda b: b.frame_index)
-    sample_frames = [b.frame_index for b in samples]
-    # left edge of the crop window such that it's centered on the face's midpoint
-    sample_x = [((b.x1 + b.x2) / 2) - crop_w / 2 for b in samples]
-
     frame_indices = np.arange(total_frames)
-    # np.interp holds fp[0]/fp[-1] for frame indices outside the sampled range —
-    # exactly the "freeze-pan" behavior wanted before the first / after the last sample.
-    flat_interpolated = np.interp(frame_indices, sample_frames, sample_x)
+    interpolated = np.full(total_frames, max_x / 2, dtype=float)
 
-    try:
-        interpolated = _interpolate_with_segment_breaks(
-            samples, frame_indices, flat_interpolated, crop_w, fps
-        )
-    except Exception:
-        module_logger.exception(
-            "segment-aware interpolation failed, falling back to plain interpolation"
-        )
-        interpolated = flat_interpolated
+    for window in windows:
+        outer_mask = (frame_indices >= window.start_frame) & (frame_indices < window.end_frame)
+        if not outer_mask.any() or not window.boxes:
+            continue
+
+        samples = sorted(window.boxes, key=lambda b: b.frame_index)
+        sample_frames = [b.frame_index for b in samples]
+        # left edge of the crop window such that it's centered on the face's midpoint
+        sample_x = [((b.x1 + b.x2) / 2) - crop_w / 2 for b in samples]
+
+        # np.interp holds fp[0]/fp[-1] for frame indices outside the sampled range —
+        # exactly the "freeze-pan" behavior wanted before the first / after the last
+        # sample *within this window's own span* (outer_mask below clips it there).
+        flat = np.interp(frame_indices, sample_frames, sample_x)
+
+        try:
+            window_interp = _interpolate_with_segment_breaks(samples, frame_indices, flat, crop_w, fps)
+        except Exception:
+            module_logger.exception(
+                "segment-aware interpolation failed for one speaker window, "
+                "falling back to plain interpolation for that window"
+            )
+            window_interp = flat
+
+        interpolated[outer_mask] = window_interp[outer_mask]
 
     smoothed = _moving_average(interpolated, smoothing_window)
     clamped = np.clip(smoothed, 0, max_x).astype(int)

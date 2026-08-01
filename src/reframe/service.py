@@ -4,12 +4,12 @@ from sqlalchemy.orm import Session
 
 from src.detection.face_detector import FaceDetector
 from src.highlights.models import HighlightClip, HighlightJob
-from src.reframe.crop_path import build_crop_path, compute_crop_width
+from src.reframe.crop_path import build_crop_path_from_windows, compute_crop_width
 from src.reframe.enums import ReframeStatus
 from src.reframe.exceptions import ReframeError
 from src.reframe.models import ReframeJob
 from src.reframe.renderer import render_reframed_clip
-from src.reframe.speaker_selection import select_primary_track_with_asd
+from src.reframe.speaker_selection import select_speaker_timeline
 from src.reframe.storage import reframe_output_path
 from src.tracking.face_tracker import FaceTracker
 from src.utils.db import DATA_DIR
@@ -114,16 +114,21 @@ def run_reframe(db: Session, highlight_clip_id: str, force: bool = False) -> Ref
         job.status = ReframeStatus.CROPPING
         db.commit()
 
-        primary_boxes = select_primary_track_with_asd(video_path, all_tracks, fps, logger=logger)
+        speaker_timeline = select_speaker_timeline(video_path, all_tracks, fps, total_frames, logger=logger)
         crop_w = compute_crop_width(width, height)
-        crop_path = build_crop_path(primary_boxes, width, height, total_frames, fps)
+        crop_path = build_crop_path_from_windows(speaker_timeline, width, height, total_frames, fps)
         if crop_path:
             xs = [x for x, _y in crop_path]
-            primary_track_ids = {b.track_id for b in primary_boxes}
             logger.info(
-                "crop path: primary_track_id(s)=%s pan range x=[%d, %d] (width=%d, crop_w=%d)",
-                primary_track_ids, min(xs), max(xs), width, crop_w,
+                "crop path: %d speaker window(s), %d switch(es), pan range x=[%d, %d] (width=%d, crop_w=%d)",
+                len(speaker_timeline), len(speaker_timeline) - 1, min(xs), max(xs), width, crop_w,
             )
+            for w in speaker_timeline:
+                logger.info(
+                    "  window [%d,%d) (%.1f-%.1fs): track_id=%s segment=%s",
+                    w.start_frame, w.end_frame, w.start_frame / fps, w.end_frame / fps,
+                    w.track_id, w.segment_index,
+                )
 
         job.status = ReframeStatus.RENDERING
         db.commit()

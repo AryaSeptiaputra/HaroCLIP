@@ -1416,6 +1416,224 @@ whether the segment-heuristic tier's area-based pick (no active-speaker
 signal at all) is a visually reasonable "primary speaker" choice in
 practice, versus a real Light-ASD-scored segment.
 
+**Dynamic multi-speaker-follow added — a clip's crop can now switch which
+person it follows mid-clip, instead of locking one "primary speaker" for
+the entire duration (2026-08-01), per explicit user request after real
+evidence showed this was the actual root cause of the originally-reported
+podcast tracking complaint.** After the two fixes above shipped, a real
+vast.ai run (job `887cd489-0e5e-4104-93de-825b38adab94`, log at
+`data/VAST/logs/887cd489-0e5e-4104-93de-825b38adab94/reframe.log`) was
+inspected: neither fix's failure mode occurred (all 12 clips resolved via
+real `method=light-asd`, and `MAX_JUMP_PX_PER_SEC` never fired once across
+all 12 clips — "raw tracks" count exactly equalled "continuity segments"
+count in every log line). But visual inspection of the actual rendered
+output (`data/VAST/captioned/887cd489-.../tepe_lagi_tepe_lagi_captioned_11.mp4`,
+frames extracted at t=3s/10s/~19.7s/25s) revealed the real bug: the crop sat
+**frozen exactly between two people** (centered on a microphone stand) for
+15+ seconds, never panning even as the active speaker audibly and visibly
+changed (left person mid-sentence at t=10s; right person clearly speaking
+"aku yang bayar. Gak" at t=25s). The log for that clip:
+```
+segment summary: 15 raw tracks -> 15 continuity segments (14/15 eligible for ASD, floor=3)
+Light-ASD scores per track segment: {'1.0': -1.03, '2.0': 0.476, '3.0': 0.908, ...}
+method=light-asd track_id=3 segment=0 score=0.908
+crop path: primary_track_id(s)={3} pan range x=[542, 571] (width=1920, crop_w=608)
+```
+`track_id=3 segment=0` is one unsplit continuity segment spanning the
+**entire** 34.3s clip, with a 29px pan range — visually static. Root cause:
+the pipeline picked exactly one "primary speaker" for a clip's whole
+duration, once, and never revisited that choice — a fundamentally poor fit
+for a podcast where people trade turns talking within a single 30-75s
+highlight clip. (Whether `track_id=3` is itself a single ByteTrack ID
+quietly hovering between two adjacent faces, rather than genuinely
+following one stable speaker, remains an open question this fix can't
+settle by itself — see the new diagnostic logging below, added specifically
+to answer this from the next real run's log rather than needing another
+frame-extraction session.)
+
+User was asked earlier the same day whether to scope this in, initially
+declined (wanted the smaller freeze-fix scoped first), then after seeing
+this real evidence explicitly chose to reopen it ("Buka lagi opsi dynamic
+multi-speaker-follow").
+
+**The technical foundation for this was mostly already in place and
+partly wasted**: `LightASDScorer.score_track()` (`src/reframe/asd_scoring.py`)
+already returns a **per-frame** score sequence (one score per synthetic
+`MODEL_FPS=25` fps frame), not a single aggregate — the pre-existing code
+just collapsed it to one `mean_score` and discarded all temporal
+resolution. `crop_path.py` already had `_interpolate_with_segment_breaks()`'s
+"independent interpolation per span + hard cut at the boundary" pattern,
+which only needed generalizing from continuity-segment boundaries to
+speaker-window boundaries. `renderer.py` needed **zero changes** — confirmed
+it only ever consumes a flat `list[tuple[int,int]]`, fully agnostic to how
+it was built.
+
+- **New `SpeakerWindow` dataclass** (`src/reframe/speaker_selection.py`,
+  next to the existing `TrackSegment`): `start_frame`, `end_frame`
+  (exclusive), `track_id`, `segment_index`, `boxes` (the *entire* winning
+  segment's samples, not clipped to the window, so edge-hold/interpolation
+  at a window's own boundaries behaves like the existing per-segment
+  pattern). A list of these always covers `[0, total_frames)` with no
+  gaps — the old whole-clip single-speaker selection is just the
+  degenerate one-window case.
+- **`_score_frame_indices(seg, num_scores, source_fps)`**: maps
+  `score_track()`'s per-frame score index back to the clip's real
+  `frame_index` space. `asd_scoring.py`'s `_build_visual_feature` samples at
+  `t_start + i/MODEL_FPS` (`t_start = seg.boxes[0].frame_index / source_fps`)
+  and `_run_ensemble` only ever truncates from the end, so `scores[i]`
+  always corresponds to that same sample `i` — **no changes needed in
+  `asd_scoring.py` at all**, every input this mapping needs was already
+  available to the caller.
+- **`_score_candidates(scorer, video_path, candidates, source_fps, log)`**:
+  extracted from the old inline scoring loop — scores every candidate
+  segment exactly once (same Light-ASD calls, same count, **zero new
+  inference or audio-extraction cost**), returning each one's full
+  per-frame score sequence instead of immediately collapsing it. Shared by
+  both the new timeline builder and the old-behavior fallback below, so
+  Light-ASD is invoked from exactly one place.
+- **`_build_speaker_windows(candidates, scores_by_seg, fps, total_frames, log)`**
+  — the core new logic, a winner-take-all sweep with hysteresis:
+  - At each frame, a candidate is "active" only within its own observed
+    score-curve span (no extrapolation beyond it); the raw winner is
+    whichever active candidate scores highest right now.
+  - A frame with no active candidate at all **holds the incumbent**
+    (gap-hold — same edge-hold convention `np.interp`/this module already
+    use elsewhere).
+  - A switch only commits once a single challenger has led the
+    incumbent's own **live** score (tracked every frame the incumbent has
+    coverage, not frozen at its last winning moment — an actual bug caught
+    during local verification, see below) by `>= SCORE_MARGIN` for
+    `>= MIN_DWELL_SECONDS` of *consecutive* frames — this absorbs momentary
+    ASD noise or a short interjection ("iya", a laugh) without triggering a
+    real speaker switch. The resulting window boundary is backdated to
+    where the challenge *began*, not where the dwell streak was confirmed,
+    so the crop starts moving toward the new speaker as soon as their
+    dominance is later confirmed to have started, rather than lagging an
+    extra `MIN_DWELL_SECONDS` behind it.
+  - `MIN_DWELL_SECONDS = 1.5` and `SCORE_MARGIN = 0.3` are **both untuned
+    heuristics**, flagged explicitly the same way `track_continuity.py`'s
+    `MAX_JUMP_PX_PER_SEC` already is — no real multi-speaker footage exists
+    locally to calibrate against. `MIN_DWELL_SECONDS` loosely anchors off
+    `src/captioning/subtitles.py`'s own existing 1.5s cue-closing threshold
+    as an order-of-magnitude guess for "a natural minimum unit of continuous
+    speech" in this codebase, not a principled derivation.
+    `SCORE_MARGIN = 0.3` is roughly 8% of the raw Light-ASD logit range
+    actually observed in the real log above (roughly -2.9 to +0.9) — wide
+    enough that noise between two similar-scoring candidates shouldn't flip
+    a switch, narrow enough that a real turn change (the same log shows an
+    enormous real gap, e.g. 0.9 vs -1.0) clears it easily. Both need
+    real-footage tuning on the next vast.ai run.
+  - Accepted residual, documented rather than fixed: the window immediately
+    after a switch has no minimum length of its own — only the *challenge*
+    that produced it had to sustain the dwell. A second switch could in
+    principle follow almost immediately. Watch for suspiciously dense
+    switch clustering in the next real run's `speaker window: ...` log
+    lines.
+- **`_best_segment_by_mean_score(candidates, scores_by_seg, log)`**:
+  preserves the pre-this-change selection logic exactly (pick the single
+  segment with the highest mean score) — used as the timeline construction's
+  own error fallback. Since scoring already happened once in
+  `_score_candidates`, falling back here costs **zero additional Light-ASD
+  inference**.
+- **`select_speaker_timeline(video_path, tracks, source_fps, total_frames, logger)`**
+  replaces `select_primary_track_with_asd` (retired, not kept in parallel —
+  keeping it would either duplicate the scoring loop, doubling Light-ASD
+  cost, or rot as dead code) at the pipeline's single call site
+  (`src/reframe/service.py`). Absorbs every existing fallback tier from the
+  two earlier fixes today (`ImportError` / no eligible segment / model-load
+  failure → `_segment_heuristic_fallback`; now returns the whole
+  `TrackSegment` rather than just its boxes, so its `track_id`/
+  `segment_index` can populate the wrapping `SpeakerWindow` for logging,
+  a small quality fix caught during this session's own verification) plus a
+  new one: if `_build_speaker_windows` itself throws, falls back to
+  `_best_segment_by_mean_score`. Every fallback tier wraps its result as one
+  whole-clip `SpeakerWindow` — the worst case after this change is always
+  **exactly** today's pre-existing behavior, never a new failure mode.
+- **`src/reframe/crop_path.py`**: new `build_crop_path_from_windows(windows,
+  source_width, source_height, total_frames, fps, smoothing_window)`
+  generalizes `_interpolate_with_segment_breaks`'s existing pattern — each
+  window is interpolated independently (including its own internal
+  continuity-break detection, same defense-in-depth as before, since a
+  window's boxes normally already come from one continuity-clean
+  `TrackSegment` so this is usually a no-op) and masked into only that
+  window's own `[start_frame, end_frame)` span, so a window's own
+  edge-hold/extrapolation never bleeds into a neighboring window — a hard
+  cut at every window boundary, not just the pre-existing intra-track
+  discontinuity boundaries. The old `build_crop_path()` is now a **thin
+  wrapper** around this (one whole-clip `SpeakerWindow`), kept rather than
+  deleted so any caller still passing a flat box list keeps working
+  unchanged — **confirmed byte-identical** to the pre-this-change
+  `build_crop_path()` on the same fixture (see verification below).
+- **`src/reframe/service.py`**: `run_reframe()` now calls
+  `select_speaker_timeline()` + `build_crop_path_from_windows()`, with new
+  logging: total window/switch count and, per window, its frame range,
+  seconds, `track_id`, and `segment_index`.
+- **New diagnostic logging** (cheap, no behavior change, added specifically
+  to help judge the `track_id=3` ambiguity above from the next real run's
+  log without another frame-extraction session): per candidate during
+  scoring, `center_x_std` (position variance) alongside the existing
+  `mean_score` — a segment spanning a long multi-speaker exchange with
+  *unexpectedly low* `center_x_std` is suspicious evidence of a track
+  quietly hovering between two people rather than genuinely tracking one
+  stable speaker. Per finalized `SpeakerWindow`, its own `center_x_std` and
+  `max_velocity_px_s` (reusing `track_continuity`'s existing velocity
+  formula, purely as a logged number here, not a new split trigger).
+- **Scope unchanged from every earlier reframe entry**: no changes to
+  `src/highlights/` (including jump-cut `segments_json`), `src/rendering/clipper.py`,
+  `src/tracking/`, `src/detection/`, or `track_continuity.py` (still used
+  internally by `_build_segments`, same role as before) — reframe still
+  operates entirely on the already-rendered, already-stitched clip file.
+
+**Verified locally** (hand-built fixtures, no CUDA GPU, no real footage —
+same discipline as the rest of this module; regression checks compare
+against the actual pre-session `crop_path.py`/`speaker_selection.py` loaded
+from git history, not a hand-reproduced approximation): `_score_frame_indices`
+against a segment starting mid-clip and one starting at frame 0 with a
+different fps, both matched manual arithmetic; a synthetic two-candidate
+fixture (segment A high-then-low, segment B low-then-high, overlapping in
+time) confirmed the timeline starts on A, does **not** switch at A's own
+score drop (B hasn't cleared margin/dwell yet), and switches to B with the
+window boundary backdated to exactly the frame B first cleared the margin —
+this test caught a **real bug** during verification: the incumbent's
+comparison score was frozen at its last *winning* moment instead of
+tracking its actual current (already-declining) score, which silently
+prevented switches indefinitely once an incumbent's peak was higher than a
+later challenger's peak; fixed, then reverified. A brief above-margin blip
+well under `dwell_frames` correctly triggers no switch (flicker rejection);
+a coverage gap between two candidates correctly holds the incumbent and
+doesn't spuriously switch to a same-scoring successor once it appears
+(gap-hold). Fallback regression: with `LightASDScorer` import forced to fail,
+`select_speaker_timeline`'s single-window result is **byte-identical** to
+the pre-session `select_primary_track_with_asd()`'s result on the same
+2-track fixture. `build_crop_path_from_windows` hard-cut behavior confirmed
+on a 2-window fixture (position holds through the first window's last
+frame, jumps cleanly at the boundary, no ramp). `build_crop_path()`'s
+thin-wrapper output confirmed **byte-identical** to the pre-session
+`build_crop_path()` on the same fixture, including the empty-boxes
+freeze-center path. The 3+-person fragmentation fallback (`method=segment-heuristic`,
+from the fix immediately above this one) re-verified through the new
+`select_speaker_timeline` path, now correctly carrying `track_id` into the
+wrapping `SpeakerWindow` (previously `None` there, a minor logging gap
+fixed in the same pass). Full chain (`_detect_and_track` →
+`select_speaker_timeline` → `build_crop_path_from_windows`) re-run
+end-to-end against the existing synthetic zero-face test clip, confirmed a
+single freeze-center window and the `method=none` log line. Diagnostic
+logging helpers (`_center_x_std`, `_max_velocity_px_per_sec`) run without
+crashing on both low- and high-variance fixtures.
+
+**Not yet verified, needs a real vast.ai run** (same caveat category as the
+rest of this module): whether real per-frame Light-ASD scores are stable/
+discriminating enough in practice to avoid flicker on genuine speech (only
+tested against clean hand-written score curves, never real model output
+noise); whether `MIN_DWELL_SECONDS=1.5`/`SCORE_MARGIN=0.3` are anywhere
+close to well-tuned; and — the question this fix was specifically built to
+answer — whether this actually resolves clip #11's visually-confirmed
+symptom, or whether the new `center_x_std`/`max_velocity_px_s` diagnostics
+instead confirm `track_id=3` was a single track hovering between two people
+at the detection/tracking level all along, a case no amount of
+selection-level logic can fix (which would point to a future YOLOv8+ByteTrack
+investigation, out of scope here).
+
 **Light-ASD re-evaluated against newer ASD models, per explicit user request
 after the crop-drift fix above — kept as-is, shelved not reopened
 (2026-08-01).** User asked whether a stronger ASD model exists worth a small
@@ -1519,7 +1737,23 @@ re-verified with a real run — that's next:
    `segment summary: ... eligible for ASD ...` log lines to confirm how often
    the ASD-eligible floor is actually being missed in practice, and whether
    the area-based segment pick (no active-speaker signal) still produces a
-   visually reasonable crop compared to a real Light-ASD-scored segment.
+   visually reasonable crop compared to a real Light-ASD-scored segment;
+   confirm the 2026-08-01 dynamic multi-speaker-follow feature
+   (`SpeakerWindow`/`select_speaker_timeline` in `speaker_selection.py`,
+   `build_crop_path_from_windows` in `crop_path.py`) actually fixes clip
+   #11's frozen-between-two-people symptom (the exact clip whose visual
+   inspection motivated this feature) — watch for `speaker window: ...` log
+   lines showing multiple windows/switches on real multi-speaker clips
+   (versus collapsing back to one window every time, which would suggest
+   the hysteresis constants are too conservative or Light-ASD's real
+   per-frame scores are too noisy to discriminate); cross-check the new
+   `center_x_std`/`max_velocity_px_s` diagnostics against clip #11's
+   specific track/segment to determine whether it was ever fixable at the
+   selection level at all, versus being a detection/tracking-level
+   single-track-hovering-between-two-faces issue; and watch for whether
+   `MIN_DWELL_SECONDS=1.5`/`SCORE_MARGIN=0.3` need retuning (dense switch
+   clustering suggests too loose, no switches at all on an obviously
+   multi-speaker clip suggests too strict).
 2. Get a real short face+speech test clip (e.g. a webcam recording) to close the one
    remaining local-verification gap: actual YOLOv8-face/ByteTrack/Light-ASD behavior
    against real content, still only checked for "doesn't crash" against a synthetic
