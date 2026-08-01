@@ -406,6 +406,46 @@ intermediate ahead of the quality-defining final pass.
   YouTube Shorts apps' UI (not just the raw frame edge); real encode-time/file-size
   cost of `CROP_CRF=17` at production clip lengths on the rented GPU instance's CPU.
 
+**Final output filename now title-based, resolution/framerate forced explicitly
+(2026-08-01), per user direction.** Previously the deliverable was
+`data/captioned/<highlight_clip_id>.mp4` — a raw UUID meaningless to a human browsing
+the output folder — and no stage in the pipeline set an explicit output framerate
+anywhere (output fps was always just whatever the upstream source/reframe stage
+happened to produce).
+- `src/captioning/storage.py::captioned_output_path()` now takes `(video_title, rank)`
+  instead of `highlight_clip_id`, producing `<title-slug>_captioned_<rank:02d>.mp4`
+  (e.g. `my_awesome_video_part_1_captioned_01.mp4`) via a new `slugify()` helper
+  (lowercase, non-alphanumeric runs collapsed to `_`, truncated to 80 chars).
+  `rank` reuses the existing `HighlightClip.rank` concept already used elsewhere as
+  `clip_01.mp4`. Falls back to the slug `"video"` when the source `IngestionJob` has
+  no title (e.g. a `DIRECT`-link job, which never gets a yt-dlp title). `run_captioning`
+  (`src/captioning/service.py`) now does one extra lookup —
+  `db.get(IngestionJob, ingestion_job_id)` — to get the title; no schema/migration
+  needed, `CaptionJob.output_path` is just a string column.
+  **Known accepted limitation**: two ingestion jobs sharing an identical video title
+  would collide in the flat `data/captioned/` directory (rank alone doesn't
+  disambiguate across videos) — not solved, since the requested filename format has no
+  room for a disambiguating job id. Recorded as closed, not an open "revisit if X" item
+  — reopen only on explicit user request.
+- The final captioning ffmpeg burn-in pass now explicitly forces `-s 1080x1920 -r 120`
+  on its output, regardless of what the upstream reframe stage produced (belt-and-
+  suspenders on top of `OUTPUT_WIDTH`/`OUTPUT_HEIGHT` already being 1080x1920 in
+  `src/reframe/renderer.py` — no change needed there). `-r 120` is plain CFR frame
+  duplication (ffmpeg's default output-side `-r` behavior), not true motion
+  interpolation (`minterpolate`) — source footage is never actually shot at 120fps,
+  this simply hits the requested delivery framerate cheaply, per explicit user choice
+  over the far more CPU-expensive interpolation alternative.
+- **Verified locally**: a synthetic fixture (`IngestionJob` with a real-looking
+  punctuated title, `HighlightJob`/`HighlightClip`(`rank=1`)/`ReframeJob` reaching
+  `READY`) run through the real `run_captioning()` end-to-end reached `READY`,
+  produced the exact expected filename
+  (`my_awesome_video_part_1_2026_captioned_01.mp4`), and `ffprobe` on the produced
+  file confirmed `1080x1920` at `120/1` fps. `slugify()` also hand-checked against
+  `None`, empty string, and a 200-character title (correctly truncated to 80 chars).
+  **Not yet verified**: a real YouTube-titled video end-to-end on vast.ai — same
+  caveat as the rest of this module, covered by the already-planned real vast.ai
+  re-run below.
+
 **Custom per-frame caption renderer (Pillow) — researched, shelved, not
 implemented (2026-08-01).** While narrowing the safe-zone work above, the
 previously-deferred question of a Pillow/OpenCV-based custom caption renderer (as

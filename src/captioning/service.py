@@ -16,6 +16,7 @@ from src.captioning.subtitles import (
     write_ass,
 )
 from src.highlights.models import HighlightClip, HighlightJob
+from src.ingestion.models import IngestionJob
 from src.reframe.enums import ReframeStatus
 from src.reframe.models import ReframeJob
 from src.reframe.renderer import OUTPUT_HEIGHT, OUTPUT_WIDTH
@@ -65,6 +66,8 @@ def run_captioning(db: Session, highlight_clip_id: str, force: bool = False) -> 
     if highlight_job is None:
         raise ValueError(f"highlight job not found for clip: {highlight_clip_id}")
     ingestion_job_id = highlight_job.ingestion_job_id
+    ingestion_job = db.get(IngestionJob, ingestion_job_id)
+    video_title = ingestion_job.title if ingestion_job else None
 
     reframe_job = (
         db.query(ReframeJob).filter_by(highlight_clip_id=highlight_clip_id).one_or_none()
@@ -115,7 +118,7 @@ def run_captioning(db: Session, highlight_clip_id: str, force: bool = False) -> 
         db.commit()
 
         reframed_path = DATA_DIR / reframe_job.output_path
-        out_path = captioned_output_path(highlight_clip_id)
+        out_path = captioned_output_path(video_title, clip.rank)
         render_start = time.monotonic()
         try:
             result = subprocess.run(
@@ -124,6 +127,15 @@ def run_captioning(db: Session, highlight_clip_id: str, force: bool = False) -> 
                     "-i", str(reframed_path),
                     "-vf",
                     f"subtitles='{_escape_subtitles_path(ass_path)}'",
+                    # Final deliverable is always forced to 1080x1920 @ 120fps here,
+                    # regardless of what the upstream reframe stage produced (belt-
+                    # and-suspenders on top of OUTPUT_WIDTH/OUTPUT_HEIGHT already
+                    # being 1080x1920). -r 120 is plain CFR frame duplication, not
+                    # motion interpolation (minterpolate) — source footage is never
+                    # actually shot at 120fps, this just re-tags/duplicates frames
+                    # to hit the requested delivery framerate cheaply.
+                    "-s", "1080x1920",
+                    "-r", "120",
                     "-c:v", "libx264",
                     # crf 18 (not left at ffmpeg's default 23): this is the final
                     # deliverable pass and the one ffmpeg call in the project that
