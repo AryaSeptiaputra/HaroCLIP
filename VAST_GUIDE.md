@@ -139,6 +139,12 @@ put it in a gitignored `.env` file on the instance.
 pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 export LD_LIBRARY_PATH=`python3 -c 'import os; import nvidia.cublas.lib, nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__) + ":" + os.path.dirname(nvidia.cudnn.lib.__file__))'`
 
+# 1b. This export only lasts the current shell — if you're root (the default on
+#     vast.ai), register it system-wide instead so it survives a new SSH session
+#     without needing to re-export or source ~/.bashrc. entrypoint.sh does this
+#     automatically now; do it manually if you're not running entrypoint.sh:
+echo "$LD_LIBRARY_PATH" | tr ':' '\n' > /etc/ld.so.conf.d/nvidia-python-cuda.conf && ldconfig
+
 # 2. huggingface_hub's Rust-based hf-xet fast-download accelerator is unreliable —
 #    crashed with "Internal Writer Error: Background writer channel closed" downloading
 #    a model on a prior run. Force the plain Python downloader instead. Still relevant
@@ -153,7 +159,11 @@ export HF_TOKEN=<your-read-only-token>
 
 **Both `export` lines only last for the current shell session** — if your SSH
 connection drops and you reconnect, run them again before resuming with `--job-id`
-(or add them to `~/.bashrc` if you expect multiple sessions).
+(or add them to `~/.bashrc` if you expect multiple sessions). `HF_TOKEN` has no
+durable alternative, so it always needs re-exporting per session. The cuBLAS/cuDNN
+fix (step 1 above) does have one, though: the `ldconfig` step (1b) registers it
+system-wide, so once you've done that once as root, it survives new sessions with
+no re-export needed — `entrypoint.sh` does this automatically.
 
 ## 3. Run the pipeline
 
@@ -212,8 +222,10 @@ pip install -r requirements.txt   # picks up any new/changed dependency (e.g. an
 ```
 
 Also re-check anything that might have changed between commits:
-- Env vars — re-`export` `ANTHROPIC_API_KEY`/`HF_TOKEN`/`LD_LIBRARY_PATH` if your SSH
-  session dropped and reconnected (they don't persist across sessions, see step 2).
+- Env vars — re-`export` `ANTHROPIC_API_KEY`/`HF_TOKEN` if your SSH session dropped
+  and reconnected (they don't persist across sessions, see step 2). `LD_LIBRARY_PATH`
+  doesn't need this if you've run the `ldconfig` step (1b, step 2 above) at least
+  once as root — that registration is system-wide and survives new sessions.
 - Model weight filenames — if a code change bumped a default model variant (e.g.
   YOLOv8-face `medium`→`xlarge`), the old weight file won't match
   `YOLOV8_FACE_WEIGHTS_PATH`'s new default; re-run the relevant `curl` command from
@@ -425,7 +437,14 @@ reference/in case they resurface):
 
 - `libcublas.so.12 is not found or cannot be loaded` at the whisper transcription
   step — fixed by installing `nvidia-cublas-cu12`/`nvidia-cudnn-cu12` and setting
-  `LD_LIBRARY_PATH` to their install location (step 2).
+  `LD_LIBRARY_PATH` to their install location (step 2). **Recurred on a later real
+  run**: this error came back on an instance where `entrypoint.sh` had already run
+  successfully once before — root cause was a *new* SSH session that never sourced
+  `~/.bashrc`, so the `LD_LIBRARY_PATH` export from the earlier session simply
+  wasn't present in the new one. `entrypoint.sh` now also registers these libraries
+  system-wide via `ldconfig` (step 1b in step 2 above), which doesn't depend on
+  `~/.bashrc` or any per-session re-export — do this manually if you're not running
+  `entrypoint.sh`.
 - `Internal Writer Error: Background writer channel closed` downloading a model from
   Hugging Face — `hf-xet`'s Rust downloader crashing. Fixed by `HF_HUB_DISABLE_XET=1`
   (step 2). If it recurs even with that set, `pip uninstall -y hf-xet` to remove it

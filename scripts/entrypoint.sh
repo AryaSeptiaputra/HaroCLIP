@@ -91,10 +91,27 @@ if [ "${ENABLE_UI:-0}" = "1" ]; then
 fi
 
 # --- 4. cuBLAS/cuDNN fix (confirmed necessary on a real run — see VAST_GUIDE.md) ---
-# Persisted to .bashrc too so it's still set in any interactive shell you open later.
+# Registered system-wide via ldconfig, not just LD_LIBRARY_PATH/~/.bashrc — a real
+# recurrence of "libcublas.so.12 is not found or cannot be loaded" was traced to a
+# *new* SSH session on an instance where entrypoint.sh had already run once: that
+# session never sourced ~/.bashrc, so the exported LD_LIBRARY_PATH from the earlier
+# session simply wasn't there. Writing these dirs to /etc/ld.so.conf.d/ + running
+# ldconfig makes the libraries resolvable by ANY process on the instance (any shell,
+# a background/nohup process, cron, etc.) without depending on an environment
+# variable being re-exported at all. The LD_LIBRARY_PATH export + ~/.bashrc append
+# are kept alongside this as a fallback for a non-root context where /etc isn't
+# writable (ldconfig itself needs root, same requirement `apt-get install` above
+# already has).
 CUBLAS_CUDNN_PATH=$(python3 -c "import os, nvidia.cublas.lib, nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__) + ':' + os.path.dirname(nvidia.cudnn.lib.__file__))")
 export LD_LIBRARY_PATH="$CUBLAS_CUDNN_PATH"
 grep -qxF "export LD_LIBRARY_PATH=$CUBLAS_CUDNN_PATH" ~/.bashrc 2>/dev/null || echo "export LD_LIBRARY_PATH=$CUBLAS_CUDNN_PATH" >> ~/.bashrc
+if [ -w /etc/ld.so.conf.d ] || [ "$(id -u)" -eq 0 ]; then
+    echo "$CUBLAS_CUDNN_PATH" | tr ':' '\n' > /etc/ld.so.conf.d/nvidia-python-cuda.conf
+    ldconfig
+    echo "[entrypoint] cuBLAS/cuDNN registered system-wide via ldconfig (survives new shell sessions)"
+else
+    echo "[entrypoint] WARNING: no root access to register cuBLAS/cuDNN via ldconfig — falling back to LD_LIBRARY_PATH/~/.bashrc only, which will NOT apply in a new SSH session that doesn't source ~/.bashrc"
+fi
 
 # --- 5. hf-xet workaround (confirmed necessary on a real run — see VAST_GUIDE.md) ---
 export HF_HUB_DISABLE_XET=1
