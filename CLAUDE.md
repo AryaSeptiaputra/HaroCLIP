@@ -1826,6 +1826,67 @@ fixed (2026-08-02):**
      need the troubleshooting cell on some fraction of real runs, not just
      read it as a footnote.
 
+**Campaign-relevant clips were becoming pure product pitches instead of hooks
+with the product riding along — sharpened the campaign-context layering
+instruction in `build_system_prompt()` (2026-08-02).** Real run
+(`ingestion_job_id=0cc9725a-881d-47a1-bcd0-7d36e85cb049`, a Kahf sunscreen x
+Raditya Dika promo video) surfaced this: the campaign brief PDF was almost
+entirely product-promotion spec (mandatory slogans, required timestamps,
+hashtag/shopping-cart-link requirements). Once summarized into
+`IngestionJob.campaign_context` (`src/campaign_brief/summarizer.py`, Haiku)
+and layered onto highlight selection, **8 of 9 selected clips were pure
+product-feature/spec recitation** (reapplication instructions, texture/SPF
+demo, "transparent formula" explanation) — only 1 of 9 was a genuine
+non-promotional hook (a joke about Indra Jegel vs Dwayne Johnson), despite the
+source video clearly containing more such moments per the full transcript.
+
+Root cause: the existing layering instruction ("prefer candidates that are
+both a genuine hook AND relevant... weigh both") was directionally right but
+too abstract to survive contact with a campaign_context paragraph dense with
+"mandatory"-toned language — the model had no concrete per-candidate test to
+apply, so it defaulted to treating "covers a required campaign item" as
+sufficient justification on its own.
+
+**This is explicitly a qualitative fix, not a numeric one** — the user
+rejected both a hard and a "flexible" cap on how many clips may be
+promotion-only, matching this project's existing "let Claude judge from
+content" philosophy (see the candidate-count entry above). The fix instead
+gives Sonnet a concrete, mechanically-applicable test in
+`build_system_prompt()`: for every campaign-relevant candidate, strip out
+every campaign-specific word and check whether the clip is still a hook under
+the base rules (curiosity gap, surprise, emotional peak, concrete insight,
+controversial opinion) — select it freely if yes, reject it if no, even when
+the brief marks that moment mandatory. The instruction now names concrete bad
+patterns to reject (feature/spec recitation, reading a slogan/hashtag/keyword
+list, step-by-step application instructions) and concrete good patterns to
+seek out (a joke that naturally mentions the product, a relatable moment that
+happens to involve using it, an insight/opinion that uses the product as its
+example) — generic, not brand-specific, so it's reusable across future
+campaigns.
+
+**Scoped to `src/highlights/prompt.py` alone** — `src/campaign_brief/
+summarizer.py` (the Haiku call that produces `campaign_context` from the
+brief PDF) was read in full and deliberately left unchanged: it never sees
+the video transcript, so it cannot itself judge hook-worthiness, and
+softening its extraction tone risks silently under-representing content the
+client genuinely needs honored for brand/legal approval. Keeping the "is
+this a hook" judgment in exactly one place (the selection-stage prompt, which
+does see the transcript) avoids duplicating/drifting logic across two
+independently-tuned prompts — same reasoning this project has applied to
+prior prompt-only fixes (jump-cuts, candidate count). If a future real run
+still shows heavily promo-skewed results after this change, the next lever
+is a light wording tweak to `summarizer.py`'s tone (not logic duplication),
+not attempted here.
+
+**Verification status**: no local `ANTHROPIC_API_KEY` to smoke-test the real
+prompt change (same limitation as the rest of this module's Claude API work).
+Whether this measurably shifts the highlight-candidate mix away from
+promo-only clips in practice needs a real re-run against
+`ingestion_job_id=0cc9725a-881d-47a1-bcd0-7d36e85cb049` (or a similarly
+promo-heavy campaign brief) — `--job-id` resume should be usable if the
+ingestion/processing/transcription stages for that job already completed,
+same resume pattern documented elsewhere in this file.
+
 ## Architecture
 
 Planned across 5 phases (details TBD as implementation proceeds).
