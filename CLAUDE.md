@@ -1668,6 +1668,164 @@ decisions above. If revisited later, LR-ASD is the lowest-effort path (MIT,
 same-author codebase, small gain); LoCoNet/TalkNCE would need the license
 question resolved with their authors first before any vendoring work starts.
 
+**Colab notebook added for reframe/captioning re-runs without a fresh Claude
+call (2026-08-02).** `notebooks/haroclip_colab.ipynb` — prompted by real
+peak-VRAM numbers from a vast.ai run (`data/VAST/logs/887cd489-.../reframe.log`)
+coming in far below the 24GB budget (reframe stage topped out ~1.3GB
+`reserved`, per `log_vram()`, though that call only snapshots right after
+each model load, not true inference-time peak — so this doesn't confirm the
+whole pipeline's real ceiling, whisper's own load line showed an implausible
+0.0MB for the same reason), making a much cheaper GPU tier worth exploring.
+Google Colab was evaluated: free tier gives a T4 (16GB VRAM), and Colab Pro's
+$11.99/mo for 100 compute units works out to roughly $0.14/hr of T4 time vs.
+vast.ai's ~$0.35-0.55/hr for a 4090 — the trade-off is slower raw compute
+(Turing T4 vs. Ampere/Ada 3090/4090) and no persistent server/session
+between runs, not a fundamental blocker for this project's CLI-only current
+path.
+
+The notebook's actual purpose is narrower than "run the pipeline on Colab"
+generically — it resumes a **specific already-processed job**
+(`fa5be0db-ff05-4f3f-b3eb-eccc9af8915d`, tracked in `data/VAST/haroclip.db`)
+whose highlight *selection* is already done (`HighlightClip.segments_json`
+for all 12 clips already in the DB) purely to re-run **reframe** (to pick up
+today's dynamic multi-speaker-follow feature) and **captioning**, without
+spending Claude API credit on a selection that's already been paid for.
+Discovered along the way: the DB alone isn't sufficient to resume — both
+`run_reframe()`/`run_captioning()` only check DB status to short-circuit,
+never on-disk file existence, and the actual input files
+(`data/clips/<job_id>/clip_XX.mp4`, `data/videos/<job_id>/transcript.json`)
+weren't present locally for this job (only `campaign_briefs/`/`captioned/`/
+`captions/`/`logs/` had been downloaded from the vast.ai instance, which may
+no longer be running). Rather than requiring the original instance, the
+notebook regenerates those inputs itself: re-downloads the source video from
+`IngestionJob.source_url` (`run_processing(..., force=True)` — yt-dlp +
+ffmpeg, no GPU/LLM), re-transcribes via `transcribe()` directly (whisper,
+GPU, **not** `run_highlight_detection()`, which would also re-call Claude
+and delete the existing `HighlightClip` rows), and re-renders each clip via
+`render_clip()` using the segment timestamps **already stored** in
+`segments_json` — so the highlight selection itself is never touched or
+re-derived, only its render artifacts. Assumes the source YouTube link is
+still resolvable via yt-dlp (a real, flagged risk — Colab's shared IP ranges
+are sometimes rate-limited/blocked by YouTube; noted in the notebook as a
+manual-upload fallback, not automated).
+
+Setup cells mirror `scripts/entrypoint.sh`'s steps (ffmpeg, Python deps,
+YOLOv8-face weight download) adapted for a Drive-mounted `data/` tree instead
+of a fresh vast.ai instance's local disk — `torch`/`torchvision` are
+deliberately *not* reinstalled since Colab's runtime already ships a
+CUDA-matched build, unlike vast.ai's PyTorch-template assumption.
+**`YOLOV8_FACE_WEIGHTS_PATH` needed calling out explicitly**: it has its own
+independent `os.getenv` default in `src/detection/face_detector.py`
+("data/models/...", a plain relative-path literal), not derived from
+`DATA_DIR`, so pointing `DATA_DIR` at Drive doesn't automatically relocate
+it — the notebook sets both env vars explicitly. Also flags a real gotcha
+confirmed by reading `src/utils/db.py`: `DATA_DIR` is read once at module
+import time, not lazily, so the env var must be set before any `src` import
+in the notebook or a mid-session fix requires a full runtime restart, not
+just re-running the setting cell.
+
+**Verification status**: every function call in the notebook was verified
+against its actual current signature by reading the source directly
+(`run_processing`, `transcribe`, `render_clip`, `run_reframe`,
+`run_captioning`, all in `src/*/service.py` or equivalent) and the notebook
+JSON was validated to parse correctly — but **the notebook itself has not
+been run on a real Colab instance**, same "needs a real run" caveat as every
+other unverified piece of this project. Open questions for that first run:
+whether yt-dlp actually succeeds from Colab's IP, whether `pip install`
+resolves cleanly against Colab's pre-installed torch build without version
+conflicts, and — the actual point of doing this — whether the dynamic
+multi-speaker-follow fix visibly changes the previously-frozen clip's crop
+behavior once reframe re-runs.
+
+**Second Colab notebook added for a full end-to-end run (2026-08-02)**,
+per user request for something broader than the resume-only notebook above:
+`notebooks/haroclip_colab_e2e.ipynb` replicates `src/pipeline/run.py`'s
+exact orchestration (`--url` XOR `--job-id`, `--force`,
+`--campaign-context`/`--campaign-file`/`--campaign-pdf`, `--hf-token`) as
+notebook cells, for **either** a brand-new video **or** resuming an existing
+`ingestion_job_id` (the requested "use case for continuing forward" —
+every stage past ingestion is already idempotent, so resuming safely picks
+up wherever a job actually left off, or `FORCE=True` redoes everything).
+Unlike the first notebook, this one **does** call the Claude API for real
+(fresh highlight detection) unless resuming a job whose highlights are
+already `READY` — `ANTHROPIC_API_KEY` and `HF_TOKEN` are both entered via
+`getpass` rather than sitting as plain variables in the notebook file
+(`HF_TOKEN` started as a plain config-cell variable, moved to `getpass`
+after user feedback that a credential shouldn't sit in cleartext in the
+notebook even though it's optional — same reasoning already applied to
+`ANTHROPIC_API_KEY`; Colab's built-in encrypted Secrets manager was offered
+as a persist-across-sessions alternative but declined in favor of keeping
+both keys on the same `getpass` pattern). `pipeline/run.py`'s `main()` itself was **not**
+called directly — it's argparse-only and calls `sys.exit(1)` on every
+failure path, which would kill a Colab kernel — so its ~15-line
+orchestration body was replicated as separate cells using plain
+`raise RuntimeError(...)` instead, giving per-stage visibility in Colab's
+output rather than one opaque process exit. Setup cells (Drive mount, env
+vars, system/Python deps, `sys.path`, YOLOv8-face weights) are copied
+identically from the first notebook, not redesigned. Same verification
+status as the first: every function call (`create_job`, `run_validation`,
+`apply_campaign_brief`, `run_processing`, `run_highlight_detection`,
+`run_reframe`, `run_captioning`) was checked against its actual current
+signature by reading the source directly, and the notebook JSON parses
+correctly — but it has **not been run on a real Colab instance yet**.
+
+**First real Colab run surfaced two bugs in `haroclip_colab_e2e.ipynb`, both
+fixed (2026-08-02):**
+1. **`init_db()` created zero tables** (`OperationalError: no such table:
+   ingestion_jobs` on the very first DB write). Root cause:
+   `Base.metadata.create_all()` only creates tables for SQLAlchemy models
+   that have actually been imported/registered with `Base` by the time it
+   runs, and the "Open the DB" cell called `init_db()` before any cell had
+   imported `IngestionJob`/`ProcessingJob`/etc. `src/pipeline/run.py` never
+   hits this because it imports every service module (which transitively
+   import their models) at the top of the file, before `main()` ever calls
+   `init_db()` — the notebook's cell-by-cell structure broke that implicit
+   ordering. Fixed by importing all 5 model modules
+   (`IngestionJob`/`ProcessingJob`/`HighlightJob`/`HighlightClip`/
+   `ReframeJob`/`CaptionJob`) directly in the "Open the DB" cell, before
+   `init_db()` runs there. `haroclip_colab.ipynb` doesn't have this bug — it
+   always operates on an existing DB copy that already has every table from
+   its original vast.ai run, so `create_all()`'s completeness never mattered
+   there.
+2. **`ctranslate2` (faster-whisper's backend) CUDA/cuDNN version
+   incompatibility loading the whisper model — turned out to be a moving
+   target, not a single fixed pin.** Three rounds on the real Colab session:
+   - **Round 1**: default `pip install faster-whisper` pulled in
+     `ctranslate2>=4.5.0`, which needs CuDNN v9/CUDA>=12.3 — failed with
+     `RuntimeError: CUDA failed with error CUDA driver version is
+     insufficient for CUDA runtime version` (driver too old for that CUDA
+     runtime). Fixed (at the time) by pinning `ctranslate2==4.4.0`.
+   - **Round 2**: that pin then failed differently —
+     `Could not load library libcudnn_ops_infer.so.8` — because `4.4.0`
+     needs cuDNN8, but this Colab environment's installed cuDNN was v9 (a
+     driver-too-old-for-newest/cuDNN-too-new-for-oldest sandwich). Tried
+     `ctranslate2==4.5.0` as a middle ground (the version that added cuDNN9
+     support without yet requiring the newest CUDA runtime).
+   - **Round 3**: before confirming whether 4.5.0 worked, `!nvidia-smi` on a
+     later session showed driver `580.82.07` / **CUDA 13.0** — comfortably
+     new enough for any recent `ctranslate2`, contradicting the Round 1
+     "insufficient driver" diagnosis entirely. This confirmed **Colab
+     assigns different GPU host machines with different driver/CUDA/cuDNN
+     bundles across sessions** — there is no single version pin that's
+     reliably correct across runs. (Google Colab's Command Palette → "Use
+     fallback runtime version" — which reverts the whole CUDA/driver/cuDNN
+     image to the pre-upgrade snapshot — was discussed as a possible
+     environment-level fix instead of chasing package pins, but it doesn't
+     persist across sessions and its availability window is temporary, so it
+     isn't a substitute for the notebook handling version drift on its own.)
+   - **Final approach**: both notebooks now install `ctranslate2` **unpinned**
+     (whatever `faster-whisper` resolves by default) and rely on a
+     troubleshooting cell instead of a fixed version — the cell maps the
+     *exact error text* to a direction to pin (`"...insufficient for CUDA
+     runtime..."` → pin older, `4.4.0`; `"...libcudnn_ops_infer.so.8..."` →
+     pin newer, `4.5.0`) plus `!nvidia-smi`/`!pip show ctranslate2`
+     diagnostics to check first, plus a CPU-fallback (`WHISPER_DEVICE=cpu`)
+     escape hatch as a last resort. This is a **live external
+     version-compatibility constraint that varies by session**, not a
+     HaroCLIP code bug and not a one-time-fixable one — expect to actually
+     need the troubleshooting cell on some fraction of real runs, not just
+     read it as a footnote.
+
 ## Architecture
 
 Planned across 5 phases (details TBD as implementation proceeds).
